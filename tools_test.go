@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -302,6 +303,159 @@ func TestFTSQueryRewrite(t *testing.T) {
 		if got := ftsQuery(c.in); got != c.want {
 			t.Errorf("ftsQuery(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestConfigRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ExcludeChats) != 0 {
+		t.Fatalf("missing config not empty: %+v", cfg)
+	}
+	if _, err := cfg.exclude("-100123456", "Work Chat", "archived"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.exclude("-100123456", "Work Chat", "dup"); err == nil {
+		t.Fatal("duplicate exclusion must error")
+	}
+	if err := saveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.ExcludeChats) != 1 || loaded.ExcludeChats[0].ID != "-100123456" || loaded.ExcludeChats[0].ExcludedAt == "" {
+		t.Fatalf("loaded = %+v", loaded)
+	}
+	entry, err := loaded.include("Work Chat") // by name
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.ID != "-100123456" {
+		t.Fatalf("entry = %+v", entry)
+	}
+	if _, err := loaded.include("Work Chat"); err == nil {
+		t.Fatal("including a non-excluded chat must error")
+	}
+}
+
+func TestQueryExclusions(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	excl := []string{"-100123456"}
+
+	chats, err := db.Chats(ctx, ChatFilter{}, excl...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chats) != 1 || chats[0].ID != "777000111" {
+		t.Fatalf("chats with exclusion = %+v", chats)
+	}
+	messages, err := db.Messages(ctx, MessageFilter{}, excl...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Chat != "777000111" {
+		t.Fatalf("messages with exclusion = %+v", messages)
+	}
+	hits, err := db.Search(ctx, "договор", "", 0, excl...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("search leaked excluded chat: %+v", hits)
+	}
+	if _, err := db.Topics(ctx, "Work Chat", 0, excl...); err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("topics on excluded chat: %v", err)
+	}
+	if _, err := db.Messages(ctx, MessageFilter{Chat: "Work Chat"}, excl...); err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("messages for excluded chat: %v", err)
+	}
+	// Unknown chat still returns empty results rather than an error.
+	unknown, err := db.Messages(ctx, MessageFilter{Chat: "Ghost"}, excl...)
+	if err != nil || len(unknown) != 0 {
+		t.Fatalf("unknown chat: %v %+v", err, unknown)
+	}
+}
+
+func TestPrune(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	// Stage one media file inside the archive media dir and one outside;
+	// prune must remove only the archived one.
+	mediaDir := filepath.Join(filepath.Dir(db.path), "media", "ab")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(mediaDir, "deadbeef")
+	outside := filepath.Join(t.TempDir(), "keepme")
+	for _, p := range []string{inside, outside} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.sql.Exec(`UPDATE messages SET media_path = ? WHERE rowid = 1`, inside); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.Exec(`UPDATE messages SET media_path = ? WHERE rowid = 2`, outside); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Prune(ctx, db.path, []string{"-100123456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Chats != 1 || res.Messages != 4 || res.Topics != 2 || res.MediaFiles != 1 {
+		t.Fatalf("prune result = %+v", res)
+	}
+	if _, err := os.Stat(inside); !os.IsNotExist(err) {
+		t.Fatalf("archived media still on disk: %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("file outside media dir was removed: %v", err)
+	}
+	var n int
+	if err := db.sql.QueryRow("SELECT count(*) FROM messages WHERE chat_jid = '-100123456'").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("messages after prune = %d (%v)", n, err)
+	}
+	if err := db.sql.QueryRow("SELECT count(*) FROM messages_fts").Scan(&n); err != nil || n != 1 { // only Иван's row
+		t.Fatalf("fts after prune = %d (%v)", n, err)
+	}
+	if err := db.sql.QueryRow("SELECT count(*) FROM folder_chats").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("folder_chats after prune = %d (%v)", n, err)
+	}
+
+	again, err := Prune(ctx, db.path, []string{"-100123456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Chats != 0 || again.Messages != 0 {
+		t.Fatalf("prune not idempotent: %+v", again)
+	}
+	noop, err := Prune(ctx, db.path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noop.Chats != 0 {
+		t.Fatalf("empty prune = %+v", noop)
+	}
+}
+
+func TestPathWithin(t *testing.T) {
+	dir := t.TempDir()
+	if !pathWithin(dir, filepath.Join(dir, "a", "b")) {
+		t.Fatal("nested path should be within")
+	}
+	if pathWithin(dir, filepath.Join(dir, "..", "escape")) {
+		t.Fatal("escape should not be within")
+	}
+	if pathWithin(dir, dir) {
+		t.Fatal("dir itself should not be within")
 	}
 }
 

@@ -60,6 +60,9 @@ Any other MCP client (stdio):
 | `get_messages` | Messages with filters: chat, sender, topic, time range, direction |
 | `search_messages` | Full-text search (FTS5) with highlighted snippets |
 | `list_topics` | Forum topics of a chat, pinned first |
+| `get_sync_config` | Show chats excluded from synchronization |
+| `exclude_chat` | Exclude a chat: removed from the archive immediately and hidden from all tools |
+| `include_chat` | Stop excluding a chat; history returns on the next import |
 
 Search notes: plain words match by prefix, so Russian inflections work —
 `договор` finds *договорились*, *договорённости*. FTS5 syntax also works:
@@ -73,11 +76,14 @@ are strictly read-only; telemcp never writes to the archive.
 
 telemcp reads whatever the last import left behind; run `telecrawl import`
 on a schedule. Repeated imports merge idempotently (no duplicates). A
-launchd template for macOS lives in `contrib/`:
+launchd template for macOS lives in `contrib/` (imports every 10 minutes,
+then prunes excluded chats):
 
 ```sh
 sed -e "s|__TELECRAWL_BIN__|$HOME/bin/telecrawl|" \
-    -e "s|__LOG__|$HOME/.telecrawl/sync.log|" \
+    -e "s|__TELEMCP_BIN__|$PWD/bin/telemcp|" \
+    -e "s|__LOG__|$HOME/.telecrawl/sync.log|g" \
+    -e "s|com\.example\.telemcp-sync|com.$USER.telemcp-sync|" \
     contrib/com.example.telemcp-sync.plist > ~/Library/LaunchAgents/com.$USER.telemcp-sync.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.telemcp-sync.plist
 ```
@@ -85,6 +91,21 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.telemcp-sync.p
 `telecrawl import --messages-limit 100` keeps periodic syncs fast; drop the
 flag for a full-depth import. Reading the database while an import runs is
 safe (WAL).
+
+## Sync exclusions
+
+Some chats are not worth archiving — dead groups, or conversations you would
+rather not keep on disk. Exclude them from any MCP client:
+
+> Exclude the chat *Old Project Team* from sync, reason: archived.
+
+`exclude_chat` records the chat in the telemcp config (managed entirely via
+MCP tools, stored under `~/Library/Application Support/telemcp/config.json`,
+override with `TELEMCP_CONFIG`), immediately deletes its messages, topics and
+archived media from the database, and hides it from every telemcp tool. The
+sync agent runs `telemcp prune` after each import so excluded chats never
+linger in the archive. `include_chat` reverses the exclusion; the chat's
+history reappears after the next import.
 
 ## Development
 

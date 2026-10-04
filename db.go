@@ -117,14 +117,18 @@ type ChatFilter struct {
 	UnreadOnly bool
 }
 
-// Chats lists archived chats, most recently active first.
-func (d *DB) Chats(ctx context.Context, f ChatFilter) ([]Chat, error) {
+// Chats lists archived chats, most recently active first. Excluded chats
+// (see Config) are omitted.
+func (d *DB) Chats(ctx context.Context, f ChatFilter, excluded ...string) ([]Chat, error) {
 	limit := clampLimit(f.Limit, 50, primaryLimit)
 	var (
 		args  []any
 		join  string
 		where = []string{"c.deleted_at IS NULL"}
 	)
+	if clause := notIn("c.id", excluded, &args); clause != "" {
+		where = append(where, clause)
+	}
 	if f.UnreadOnly {
 		where = append(where, "c.unread_count > 0")
 	}
@@ -180,15 +184,23 @@ func (d *DB) resolveFolder(ctx context.Context, folder string) (string, error) {
 }
 
 func (d *DB) resolveChat(ctx context.Context, chat string) (string, error) {
-	var id string
-	err := d.sql.QueryRowContext(ctx,
-		"SELECT id FROM chats WHERE deleted_at IS NULL AND (id = ? OR name = ?) LIMIT 1",
-		chat, chat).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("chat %q not found; call list_chats first", chat)
-	}
+	id, _, err := d.ChatRef(ctx, chat)
 	return id, err
 }
+
+// ChatRef resolves a chat id or exact display name to its archive id and name.
+func (d *DB) ChatRef(ctx context.Context, chat string) (id, name string, err error) {
+	err = d.sql.QueryRowContext(ctx,
+		"SELECT id, name FROM chats WHERE deleted_at IS NULL AND (id = ? OR name = ?) LIMIT 1",
+		chat, chat).Scan(&id, &name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", fmt.Errorf("chat %q not found; call list_chats first", chat)
+	}
+	return id, name, err
+}
+
+// Path returns the archive path this DB was opened from.
+func (d *DB) Path() string { return d.path }
 
 // Message is a single archived message.
 type Message struct {
@@ -218,13 +230,21 @@ type MessageFilter struct {
 }
 
 // Messages reads archived messages matching the filter, newest first unless
-// f.Asc is set.
-func (d *DB) Messages(ctx context.Context, f MessageFilter) ([]Message, error) {
+// f.Asc is set. Excluded chats are omitted; asking for one explicitly is an
+// error so callers learn the chat is excluded rather than seeing empty
+// results.
+func (d *DB) Messages(ctx context.Context, f MessageFilter, excluded ...string) ([]Message, error) {
 	limit := clampLimit(f.Limit, 50, primaryLimit)
+	if err := checkChatAllowed(ctx, d, f.Chat, excluded); err != nil {
+		return nil, err
+	}
 	var (
 		args  []any
 		where = []string{"deleted_at IS NULL"}
 	)
+	if clause := notIn("chat_jid", excluded, &args); clause != "" {
+		where = append(where, clause)
+	}
 	if f.Chat != "" {
 		where = append(where, "(chat_jid = ? OR chat_name = ?)")
 		args = append(args, f.Chat, f.Chat)
@@ -320,10 +340,13 @@ type SearchHit struct {
 }
 
 // Search runs a full-text query over message text and returns matches with
-// highlighted snippets, newest first.
-func (d *DB) Search(ctx context.Context, query, chat string, limit int) ([]SearchHit, error) {
+// highlighted snippets, newest first. Excluded chats are omitted.
+func (d *DB) Search(ctx context.Context, query, chat string, limit int, excluded ...string) ([]SearchHit, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("empty search query")
+	}
+	if err := checkChatAllowed(ctx, d, chat, excluded); err != nil {
+		return nil, err
 	}
 	limit = clampLimit(limit, 20, searchLimit)
 	var (
@@ -331,6 +354,9 @@ func (d *DB) Search(ctx context.Context, query, chat string, limit int) ([]Searc
 		where = []string{"messages_fts MATCH ?", "m.deleted_at IS NULL"}
 	)
 	args = append(args, ftsQuery(query))
+	if clause := notIn("m.chat_jid", excluded, &args); clause != "" {
+		where = append(where, clause)
+	}
 	if chat != "" {
 		where = append(where, "(m.chat_jid = ? OR m.chat_name = ?)")
 		args = append(args, chat, chat)
@@ -384,13 +410,16 @@ type Topic struct {
 }
 
 // Topics lists forum topics of a chat, pinned first, then most recently
-// active.
-func (d *DB) Topics(ctx context.Context, chat string, limit int) ([]Topic, error) {
+// active. Asking for an excluded chat is an error.
+func (d *DB) Topics(ctx context.Context, chat string, limit int, excluded ...string) ([]Topic, error) {
 	if strings.TrimSpace(chat) == "" {
 		return nil, errors.New("chat is required; call list_chats first")
 	}
 	chatID, err := d.resolveChat(ctx, chat)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkExcluded(chatID, excluded); err != nil {
 		return nil, err
 	}
 	limit = clampLimit(limit, 100, primaryLimit)
@@ -544,4 +573,145 @@ func clampLimit(v, def, max int) int {
 		return max
 	}
 	return v
+}
+
+// notIn builds a "<col> NOT IN (?,?,...)" clause and appends its parameters
+// to args. It returns "" when there is nothing to exclude.
+func notIn(col string, excluded []string, args *[]any) string {
+	if len(excluded) == 0 {
+		return ""
+	}
+	placeholders := make([]string, len(excluded))
+	for i, id := range excluded {
+		placeholders[i] = "?"
+		*args = append(*args, id)
+	}
+	return col + " NOT IN (" + strings.Join(placeholders, ",") + ")"
+}
+
+// checkExcluded reports a friendly error when chatID is excluded.
+func checkExcluded(chatID string, excluded []string) error {
+	for _, id := range excluded {
+		if id == chatID {
+			return fmt.Errorf("chat %s is excluded from sync; call include_chat to restore it", chatID)
+		}
+	}
+	return nil
+}
+
+// checkChatAllowed resolves an explicit chat filter (if given) and errors
+// when that chat is excluded, so callers see why results would be empty.
+func checkChatAllowed(ctx context.Context, d *DB, chat string, excluded []string) error {
+	if chat == "" || len(excluded) == 0 {
+		return nil
+	}
+	chatID, _, err := d.ChatRef(ctx, chat)
+	if err != nil {
+		return nil // unknown chat: let the query return empty results
+	}
+	return checkExcluded(chatID, excluded)
+}
+
+// PruneResult summarizes a prune run.
+type PruneResult struct {
+	Chats      int `json:"chats_pruned"`
+	Messages   int `json:"messages_deleted"`
+	Topics     int `json:"topics_deleted"`
+	MediaFiles int `json:"media_files_deleted"`
+}
+
+// Prune deletes excluded chats from the archive: messages (with their FTS
+// entries), forum topics, folder links, chat rows, and archived media files.
+// It opens its own read-write connection and commits one transaction.
+func Prune(ctx context.Context, dbPath string, excluded []string) (*PruneResult, error) {
+	res := &PruneResult{}
+	if len(excluded) == 0 {
+		return res, nil
+	}
+	uri := (&url.URL{Scheme: "file", Path: dbPath}).String()
+	sqlDB, err := sql.Open("sqlite", uri+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	defer sqlDB.Close()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return nil, err
+	}
+	mediaDir, err := filepath.Abs(filepath.Join(filepath.Dir(dbPath), "media"))
+	if err != nil {
+		return nil, err
+	}
+	var mediaPaths []string
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	stmts := []struct {
+		sql  string
+		kind string
+	}{
+		{"DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages WHERE chat_jid = ?)", ""},
+		{"DELETE FROM messages WHERE chat_jid = ?", "messages"},
+		{"DELETE FROM topics WHERE chat_jid = ?", "topics"},
+		{"DELETE FROM folder_chats WHERE chat_jid = ?", ""},
+		{"DELETE FROM chats WHERE id = ?", "chats"},
+	}
+	for _, id := range excluded {
+		rows, err := tx.QueryContext(ctx,
+			"SELECT DISTINCT media_path FROM messages WHERE chat_jid = ? AND media_path IS NOT NULL AND media_path != ''", id)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			mediaPaths = append(mediaPaths, p)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for _, stmt := range stmts {
+			r, err := tx.ExecContext(ctx, stmt.sql, id)
+			if err != nil {
+				return nil, err
+			}
+			n, _ := r.RowsAffected()
+			switch stmt.kind {
+			case "messages":
+				res.Messages += int(n)
+			case "topics":
+				res.Topics += int(n)
+			case "chats":
+				res.Chats += int(n)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	for _, p := range mediaPaths {
+		abs, err := filepath.Abs(p)
+		if err != nil || !pathWithin(mediaDir, abs) {
+			continue // never touch files outside the media archive
+		}
+		if err := os.Remove(abs); err == nil {
+			res.MediaFiles++
+		}
+	}
+	return res, nil
+}
+
+// pathWithin reports whether path is strictly inside dir (not dir itself).
+func pathWithin(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil || rel == "." || rel == "" || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
