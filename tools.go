@@ -36,7 +36,7 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_chats",
 		Description: "List Telegram chats in the local telecrawl archive, most recently active first. Use the returned chat id in get_messages, search_messages and list_topics. Chats excluded from sync (see get_sync_config) are not listed.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, args listChatsArgs) (*mcp.CallToolResult, []Chat, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args listChatsArgs) (*mcp.CallToolResult, *ChatsResult, error) {
 		chats, err := db.Chats(ctx, ChatFilter{
 			Limit:      args.Limit,
 			Folder:     args.Folder,
@@ -45,13 +45,13 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return &mcp.CallToolResult{}, chats, nil
+		return &mcp.CallToolResult{}, &ChatsResult{Chats: chats}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_messages",
 		Description: "Read messages from the local telecrawl archive with filters: chat, sender, forum topic, time range, direction. Newest first unless asc=true. Combine after/before with a chat id for a timeline.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, args getMessagesArgs) (*mcp.CallToolResult, []Message, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args getMessagesArgs) (*mcp.CallToolResult, *MessagesResult, error) {
 		messages, err := db.Messages(ctx, MessageFilter{
 			Chat:   args.Chat,
 			Sender: args.Sender,
@@ -65,29 +65,29 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return &mcp.CallToolResult{}, messages, nil
+		return &mcp.CallToolResult{}, &MessagesResult{Messages: messages}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_messages",
 		Description: "Full-text search over archived Telegram messages (FTS5). Plain words match by prefix (договор matches договорённости). Also supports \"quoted phrases\", prefix*, sender:NAME, chat:NAME, OR. Returns highlighted snippets, newest first.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, args searchMessagesArgs) (*mcp.CallToolResult, []SearchHit, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args searchMessagesArgs) (*mcp.CallToolResult, *SearchResult, error) {
 		hits, err := db.Search(ctx, args.Query, args.Chat, args.Limit, exclusions()...)
 		if err != nil {
 			return nil, nil, err
 		}
-		return &mcp.CallToolResult{}, hits, nil
+		return &mcp.CallToolResult{}, &SearchResult{Hits: hits}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_topics",
 		Description: "List forum topics of a Telegram chat from the local telecrawl archive, pinned first. Use topic ids in get_messages topic filter.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, args listTopicsArgs) (*mcp.CallToolResult, []Topic, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args listTopicsArgs) (*mcp.CallToolResult, *TopicsResult, error) {
 		topics, err := db.Topics(ctx, args.Chat, args.Limit, exclusions()...)
 		if err != nil {
 			return nil, nil, err
 		}
-		return &mcp.CallToolResult{}, topics, nil
+		return &mcp.CallToolResult{}, &TopicsResult{Topics: topics}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -154,6 +154,30 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 			Note:     "chat will reappear in tools after the next telecrawl import",
 		}, nil
 	})
+}
+
+// Result wrappers below keep every tool's structured output an object with a
+// "type": "object" outputSchema, as the MCP spec requires (Claude Code
+// tolerates top-level arrays; stricter clients like pi/omp reject them).
+
+// ChatsResult wraps list_chats output.
+type ChatsResult struct {
+	Chats []Chat `json:"chats"`
+}
+
+// MessagesResult wraps get_messages output.
+type MessagesResult struct {
+	Messages []Message `json:"messages"`
+}
+
+// SearchResult wraps search_messages output.
+type SearchResult struct {
+	Hits []SearchHit `json:"hits"`
+}
+
+// TopicsResult wraps list_topics output.
+type TopicsResult struct {
+	Topics []Topic `json:"topics"`
 }
 
 // SyncConfig is the sync configuration exposed to clients.
