@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template: keep a telecrawl archive fresh so telemcp serves recent data.
+     Replace __TELECRAWL_BIN__ (path to the telecrawl binary) and __LOG__
+     (log file path), then copy to ~/Library/LaunchAgents/ and run:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<name>.plist
+     Adjust StartInterval (seconds) and --messages-limit to taste. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.telemcp-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-c</string>
+        <string>pgrep -f 'telecrawl.*import' &gt; /dev/null &amp;&amp; exit 0; '__TELECRAWL_BIN__' import --messages-limit 100 &gt;&gt; '__LOG__' 2&gt;&amp;1</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

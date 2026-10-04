@@ -1,0 +1,547 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+// DB is a read-only handle to a telecrawl SQLite archive.
+type DB struct {
+	sql  *sql.DB
+	path string
+}
+
+const (
+	primaryLimit = 500 // hard cap for any list query
+	searchLimit  = 100
+	maxTextRunes = 2000
+)
+
+// defaultDBPath returns the default telecrawl database location.
+func defaultDBPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".telecrawl", "telecrawl.db"), nil
+}
+
+// Open opens the telecrawl archive at path (empty means the default
+// ~/.telecrawl/telecrawl.db). The connection is read-only when possible;
+// telemcp only ever issues SELECTs.
+func Open(path string) (*DB, error) {
+	if path == "" {
+		var err error
+		if path, err = defaultDBPath(); err != nil {
+			return nil, err
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("telecrawl database not found at %s; run 'telecrawl import' first", path)
+		}
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%s is a directory, not a database", path)
+	}
+
+	uri := (&url.URL{Scheme: "file", Path: path}).String()
+	sqlDB, err := openSQLite(uri + "?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		// A read-only connection may fail to join a WAL database when the
+		// shared-memory files are absent; fall back to a read-write DSN
+		// (still only used for SELECTs).
+		sqlDB, err = openSQLite(uri + "?_pragma=busy_timeout(5000)")
+		if err != nil {
+			return nil, err
+		}
+	}
+	db := &DB{sql: sqlDB, path: path}
+	if err := db.checkSchema(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func openSQLite(dsn string) (*sql.DB, error) {
+	sqlDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	return sqlDB, nil
+}
+
+func (d *DB) checkSchema() error {
+	var n int
+	err := d.sql.QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('messages', 'chats')").Scan(&n)
+	if err != nil || n < 2 {
+		return fmt.Errorf("%s is not a telecrawl archive (messages/chats tables missing); run 'telecrawl import' first", d.path)
+	}
+	return nil
+}
+
+func (d *DB) Close() error { return d.sql.Close() }
+
+// Chat describes a Telegram chat in the archive.
+type Chat struct {
+	ID            string `json:"id"`
+	Kind          string `json:"kind,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Username      string `json:"username,omitempty"`
+	LastMessageAt string `json:"last_message_at,omitempty"`
+	UnreadCount   int    `json:"unread_count,omitempty"`
+	MessageCount  int    `json:"message_count,omitempty"`
+	Forum         bool   `json:"forum,omitempty"`
+}
+
+// ChatFilter narrows Chats results.
+type ChatFilter struct {
+	Limit      int
+	Folder     string // folder id or title
+	UnreadOnly bool
+}
+
+// Chats lists archived chats, most recently active first.
+func (d *DB) Chats(ctx context.Context, f ChatFilter) ([]Chat, error) {
+	limit := clampLimit(f.Limit, 50, primaryLimit)
+	var (
+		args  []any
+		join  string
+		where = []string{"c.deleted_at IS NULL"}
+	)
+	if f.UnreadOnly {
+		where = append(where, "c.unread_count > 0")
+	}
+	if f.Folder != "" {
+		folderID, err := d.resolveFolder(ctx, f.Folder)
+		if err != nil {
+			return nil, err
+		}
+		join = "JOIN folder_chats fc ON fc.chat_jid = c.id AND fc.deleted_at IS NULL"
+		where = append(where, "fc.folder_id = ?")
+		args = append(args, folderID)
+	}
+	args = append(args, limit)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT c.id, c.kind, c.name, c.username, c.last_message_at, c.unread_count, c.message_count, c.forum
+		FROM chats c `+join+`
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY c.last_message_at DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Chat{}
+	for rows.Next() {
+		var (
+			c      Chat
+			last   sql.NullInt64
+			unread sql.NullInt64
+			count  sql.NullInt64
+			forumN sql.NullInt64
+		)
+		if err := rows.Scan(&c.ID, &c.Kind, &c.Name, &c.Username, &last, &unread, &count, &forumN); err != nil {
+			return nil, err
+		}
+		c.LastMessageAt = unixToISO(last)
+		c.UnreadCount = int(unread.Int64)
+		c.MessageCount = int(count.Int64)
+		c.Forum = forumN.Int64 != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) resolveFolder(ctx context.Context, folder string) (string, error) {
+	var id string
+	err := d.sql.QueryRowContext(ctx,
+		"SELECT id FROM folders WHERE deleted_at IS NULL AND (id = ? OR title = ?) LIMIT 1",
+		folder, folder).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("folder %q not found; list folders with 'telecrawl folders'", folder)
+	}
+	return id, err
+}
+
+func (d *DB) resolveChat(ctx context.Context, chat string) (string, error) {
+	var id string
+	err := d.sql.QueryRowContext(ctx,
+		"SELECT id FROM chats WHERE deleted_at IS NULL AND (id = ? OR name = ?) LIMIT 1",
+		chat, chat).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("chat %q not found; call list_chats first", chat)
+	}
+	return id, err
+}
+
+// Message is a single archived message.
+type Message struct {
+	Chat       string `json:"chat"`
+	ChatName   string `json:"chat_name,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	Sender     string `json:"sender,omitempty"`
+	FromMe     bool   `json:"from_me,omitempty"`
+	Time       string `json:"time"`
+	Text       string `json:"text,omitempty"`
+	TopicID    string `json:"topic_id,omitempty"`
+	Type       string `json:"type,omitempty"`
+	MediaType  string `json:"media_type,omitempty"`
+	MediaTitle string `json:"media_title,omitempty"`
+}
+
+// MessageFilter narrows Messages results.
+type MessageFilter struct {
+	Chat   string // chat jid or exact chat name
+	Sender string // sender jid or exact sender name
+	Topic  string
+	After  string // RFC3339 or YYYY-MM-DD
+	Before string
+	FromMe *bool
+	Limit  int
+	Asc    bool
+}
+
+// Messages reads archived messages matching the filter, newest first unless
+// f.Asc is set.
+func (d *DB) Messages(ctx context.Context, f MessageFilter) ([]Message, error) {
+	limit := clampLimit(f.Limit, 50, primaryLimit)
+	var (
+		args  []any
+		where = []string{"deleted_at IS NULL"}
+	)
+	if f.Chat != "" {
+		where = append(where, "(chat_jid = ? OR chat_name = ?)")
+		args = append(args, f.Chat, f.Chat)
+	}
+	if f.Sender != "" {
+		where = append(where, "(sender_jid = ? OR sender_name = ?)")
+		args = append(args, f.Sender, f.Sender)
+	}
+	if f.Topic != "" {
+		where = append(where, "topic_id = ?")
+		args = append(args, f.Topic)
+	}
+	if f.After != "" {
+		after, err := parseTimeArg(f.After)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "ts >= ?")
+		args = append(args, after)
+	}
+	if f.Before != "" {
+		before, err := parseTimeArg(f.Before)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "ts <= ?")
+		args = append(args, before)
+	}
+	if f.FromMe != nil {
+		where = append(where, "from_me = ?")
+		args = append(args, *f.FromMe)
+	}
+	order := "DESC"
+	if f.Asc {
+		order = "ASC"
+	}
+	args = append(args, limit)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT chat_jid, chat_name, msg_id, sender_jid, sender_name, ts, from_me, text,
+			message_type, media_type, media_title, topic_id
+		FROM messages
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY ts `+order+`, rowid `+order+` LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		var (
+			m          Message
+			chatName   sql.NullString
+			senderJID  sql.NullString
+			senderName sql.NullString
+			ts         int64
+			fromMe     sql.NullInt64
+			text       sql.NullString
+			msgType    sql.NullString
+			mediaType  sql.NullString
+			mediaTitle sql.NullString
+			topicID    sql.NullString
+		)
+		if err := rows.Scan(&m.Chat, &chatName, &m.MessageID, &senderJID, &senderName, &ts, &fromMe, &text,
+			&msgType, &mediaType, &mediaTitle, &topicID); err != nil {
+			return nil, err
+		}
+		m.ChatName = chatName.String
+		m.Sender = senderName.String
+		if m.Sender == "" {
+			m.Sender = senderJID.String
+		}
+		m.FromMe = fromMe.Int64 != 0
+		m.Time = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+		m.Text = truncateText(text.String)
+		m.Type = msgType.String
+		m.MediaType = mediaType.String
+		m.MediaTitle = mediaTitle.String
+		m.TopicID = topicID.String
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SearchHit is a single full-text search match.
+type SearchHit struct {
+	Chat     string `json:"chat"`
+	ChatName string `json:"chat_name,omitempty"`
+	Sender   string `json:"sender,omitempty"`
+	FromMe   bool   `json:"from_me,omitempty"`
+	Time     string `json:"time"`
+	Snippet  string `json:"snippet"`
+	Text     string `json:"text,omitempty"`
+}
+
+// Search runs a full-text query over message text and returns matches with
+// highlighted snippets, newest first.
+func (d *DB) Search(ctx context.Context, query, chat string, limit int) ([]SearchHit, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, errors.New("empty search query")
+	}
+	limit = clampLimit(limit, 20, searchLimit)
+	var (
+		args  []any
+		where = []string{"messages_fts MATCH ?", "m.deleted_at IS NULL"}
+	)
+	args = append(args, ftsQuery(query))
+	if chat != "" {
+		where = append(where, "(m.chat_jid = ? OR m.chat_name = ?)")
+		args = append(args, chat, chat)
+	}
+	args = append(args, limit)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT m.chat_jid, m.chat_name, m.sender_name, m.from_me, m.ts,
+			snippet(messages_fts, 0, '⟦', '⟧', '…', 16), m.text
+		FROM messages_fts
+		JOIN messages m ON m.rowid = messages_fts.rowid
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY m.ts DESC LIMIT ?`, args...)
+	if err != nil {
+		if isFTSError(err) {
+			return nil, fmt.Errorf("invalid FTS query %q: use plain words, prefix*, \"quoted phrase\", or column filters like sender:NAME", query)
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SearchHit{}
+	for rows.Next() {
+		var (
+			h          SearchHit
+			chatName   sql.NullString
+			senderName sql.NullString
+			fromMe     sql.NullInt64
+			ts         int64
+			text       sql.NullString
+		)
+		if err := rows.Scan(&h.Chat, &chatName, &senderName, &fromMe, &ts, &h.Snippet, &text); err != nil {
+			return nil, err
+		}
+		h.ChatName = chatName.String
+		h.Sender = senderName.String
+		h.FromMe = fromMe.Int64 != 0
+		h.Time = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+		h.Text = truncateText(text.String)
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// Topic is a forum topic of a chat.
+type Topic struct {
+	TopicID       string `json:"topic_id"`
+	Title         string `json:"title,omitempty"`
+	UnreadCount   int    `json:"unread_count,omitempty"`
+	Pinned        bool   `json:"pinned,omitempty"`
+	Closed        bool   `json:"closed,omitempty"`
+	LastMessageAt string `json:"last_message_at,omitempty"`
+}
+
+// Topics lists forum topics of a chat, pinned first, then most recently
+// active.
+func (d *DB) Topics(ctx context.Context, chat string, limit int) ([]Topic, error) {
+	if strings.TrimSpace(chat) == "" {
+		return nil, errors.New("chat is required; call list_chats first")
+	}
+	chatID, err := d.resolveChat(ctx, chat)
+	if err != nil {
+		return nil, err
+	}
+	limit = clampLimit(limit, 100, primaryLimit)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT topic_id, title, unread_count, pinned, closed, last_message_at
+		FROM topics
+		WHERE chat_jid = ? AND deleted_at IS NULL
+		ORDER BY pinned DESC, last_message_at DESC LIMIT ?`, chatID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Topic{}
+	for rows.Next() {
+		var (
+			t      Topic
+			unread sql.NullInt64
+			pinned sql.NullInt64
+			closed sql.NullInt64
+			last   sql.NullInt64
+		)
+		if err := rows.Scan(&t.TopicID, &t.Title, &unread, &pinned, &closed, &last); err != nil {
+			return nil, err
+		}
+		t.UnreadCount = int(unread.Int64)
+		t.Pinned = pinned.Int64 != 0
+		t.Closed = closed.Int64 != 0
+		t.LastMessageAt = unixToISO(last)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// Status summarizes archive freshness and size.
+type Status struct {
+	DBPath        string `json:"db_path"`
+	SizeBytes     int64  `json:"size_bytes"`
+	ModifiedAt    string `json:"modified_at,omitempty"`
+	Chats         int    `json:"chats"`
+	Messages      int    `json:"messages"`
+	Topics        int    `json:"topics"`
+	NewestMessage string `json:"newest_message,omitempty"`
+	LastImportAt  string `json:"last_import_at,omitempty"`
+}
+
+// Status reports archive counts, the newest message time and the last import
+// time so clients can judge data freshness.
+func (d *DB) Status(ctx context.Context) (*Status, error) {
+	st := &Status{DBPath: d.path}
+	if info, err := os.Stat(d.path); err == nil {
+		st.SizeBytes = info.Size()
+		st.ModifiedAt = info.ModTime().UTC().Format(time.RFC3339)
+	}
+	var (
+		lastImport sql.NullString
+		newest     sql.NullInt64
+	)
+	err := d.sql.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM chats WHERE deleted_at IS NULL),
+		(SELECT count(*) FROM messages WHERE deleted_at IS NULL),
+		(SELECT count(*) FROM topics WHERE deleted_at IS NULL),
+		(SELECT value FROM sync_state WHERE key = 'last_import_at'),
+		(SELECT max(ts) FROM messages WHERE deleted_at IS NULL)`).
+		Scan(&st.Chats, &st.Messages, &st.Topics, &lastImport, &newest)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return st, nil
+		}
+		return nil, err
+	}
+	st.NewestMessage = unixToISO(newest)
+	if v := strings.TrimSpace(lastImport.String); v != "" {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			st.LastImportAt = t.UTC().Format(time.RFC3339)
+		} else {
+			st.LastImportAt = v
+		}
+	}
+	return st, nil
+}
+
+// parseTimeArg accepts RFC3339 timestamps or YYYY-MM-DD[ HH:MM] dates
+// (interpreted in local time) and returns unix seconds.
+func parseTimeArg(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	for _, layout := range []string{time.RFC3339, time.RFC3339Nano, "2006-01-02T15:04", "2006-01-02 15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t.Unix(), nil
+		}
+	}
+	return 0, fmt.Errorf("invalid time %q: use RFC3339 or YYYY-MM-DD", s)
+}
+
+// isFTSError reports whether err is an FTS5 query parse failure. Driver
+// wording varies ("syntax error", "unterminated string", ...), so match the
+// known markers rather than one exact string.
+func isFTSError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range []string{"fts5", "syntax error", "unterminated", "malformed"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// ftsQuery turns a plain word query into FTS5 prefix terms so inflected
+// forms match (договор* matches договорённости). Queries that already use
+// FTS5 syntax are passed through unchanged.
+func ftsQuery(q string) string {
+	upper := strings.ToUpper(q)
+	hasSyntax := strings.ContainsAny(q, "\"*():^") ||
+		strings.Contains(upper, " AND ") || strings.Contains(upper, " OR ") ||
+		strings.Contains(upper, " NEAR")
+	if hasSyntax {
+		return q
+	}
+	words := strings.Fields(q)
+	for i, w := range words {
+		words[i] = w + "*"
+	}
+	return strings.Join(words, " ")
+}
+
+func truncateText(s string) string {
+	r := []rune(s)
+	if len(r) <= maxTextRunes {
+		return s
+	}
+	return string(r[:maxTextRunes]) + "…[truncated]"
+}
+
+func unixToISO(v sql.NullInt64) string {
+	if !v.Valid || v.Int64 == 0 {
+		return ""
+	}
+	return time.Unix(v.Int64, 0).UTC().Format(time.RFC3339)
+}
+
+func clampLimit(v, def, max int) int {
+	if v <= 0 {
+		return def
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
