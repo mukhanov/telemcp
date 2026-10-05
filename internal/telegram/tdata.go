@@ -17,7 +17,6 @@ import (
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/session/tdesktop"
 	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/telegram/query"
 	"github.com/gotd/td/telegram/query/dialogs"
@@ -525,20 +524,11 @@ func downloadTelegramMessageMedia(ctx context.Context, raw *tg.Client, elem quer
 		name = "media"
 	}
 	outputPath := filepath.Join(messageDir, name)
-	// Reserve the retry budget so a valid flood wait cannot consume the transfer deadline.
-	downloadCtx, cancel := context.WithTimeout(ctx, telegramMediaDownloadTimeout)
-	defer cancel()
-	if _, err := downloader.NewDownloader().WithAllowCDN(true).Download(raw, file.Location).ToPath(downloadCtx, outputPath); err != nil {
-		if errors.Is(downloadCtx.Err(), context.DeadlineExceeded) {
-			return "", 0, "timeout"
-		}
-		return "", 0, "error"
+	size, status := downloadToFile(ctx, raw, file, outputPath)
+	if status != "" {
+		return "", 0, status
 	}
-	info, err := os.Stat(outputPath)
-	if err != nil || info.Size() <= 0 {
-		return "", 0, "unavailable"
-	}
-	return outputPath, info.Size(), ""
+	return outputPath, size, ""
 }
 
 func telegramMessageFile(elem querymessages.Elem) (querymessages.File, bool) {

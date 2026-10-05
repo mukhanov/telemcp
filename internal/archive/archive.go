@@ -343,6 +343,112 @@ func (d *DB) Messages(ctx context.Context, f MessageFilter, excluded ...string) 
 	return out, rows.Err()
 }
 
+// MediaFile is an archived message that carries media.
+type MediaFile struct {
+	Chat       string `json:"chat"`
+	ChatName   string `json:"chat_name,omitempty"`
+	MessageID  string `json:"message_id"`
+	Time       string `json:"time"`
+	MediaType  string `json:"media_type,omitempty"`
+	MediaTitle string `json:"media_title,omitempty"`
+	MediaPath  string `json:"media_path,omitempty"`
+	MediaSize  int64  `json:"media_size,omitempty"`
+}
+
+// MediaMessages lists a chat's archived media messages, newest first. types
+// matches the stored media_type strings ("photo", "document", "webpage",
+// ...); empty means all. Asking for an excluded chat is an error so callers
+// learn the chat is excluded rather than seeing empty results.
+func (d *DB) MediaMessages(ctx context.Context, chat string, types []string, limit int, excluded ...string) ([]MediaFile, error) {
+	limit = clampLimit(limit, 20, primaryLimit)
+	if err := checkChatAllowed(ctx, d, chat, excluded); err != nil {
+		return nil, err
+	}
+	chatID, err := d.resolveChat(ctx, chat)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		args  []any
+		where = []string{"deleted_at IS NULL", "chat_jid = ?", "coalesce(media_type,'') <> ''"}
+	)
+	args = append(args, chatID)
+	if clause := notIn("chat_jid", excluded, &args); clause != "" {
+		where = append(where, clause)
+	}
+	if len(types) > 0 {
+		where = append(where, membership("media_type", types, "IN", &args))
+	}
+	args = append(args, limit)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT chat_jid, chat_name, msg_id, ts, media_type, media_title, media_path, media_size
+		FROM messages
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY ts DESC, msg_id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanMediaFiles(rows)
+}
+
+// MediaMessage returns a single archived message. MediaType is empty when
+// the message exists but carries no media; an absent message is an error.
+// Asking for an excluded chat is an error.
+func (d *DB) MediaMessage(ctx context.Context, chat, msgID string, excluded ...string) (*MediaFile, error) {
+	if err := checkChatAllowed(ctx, d, chat, excluded); err != nil {
+		return nil, err
+	}
+	chatID, err := d.resolveChat(ctx, chat)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT chat_jid, chat_name, msg_id, ts, media_type, media_title, media_path, media_size
+		FROM messages
+		WHERE deleted_at IS NULL AND chat_jid = ? AND msg_id = ?
+		LIMIT 1`, chatID, msgID)
+	if err != nil {
+		return nil, err
+	}
+	files, err := scanMediaFiles(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("message %q not found in chat %q", msgID, chat)
+	}
+	return &files[0], nil
+}
+
+func scanMediaFiles(rows *sql.Rows) ([]MediaFile, error) {
+	defer rows.Close()
+	out := []MediaFile{}
+	for rows.Next() {
+		var (
+			m          MediaFile
+			chatName   sql.NullString
+			msgID      sql.NullString
+			ts         sql.NullInt64
+			mediaType  sql.NullString
+			mediaTitle sql.NullString
+			mediaPath  sql.NullString
+			mediaSize  sql.NullInt64
+		)
+		if err := rows.Scan(&m.Chat, &chatName, &msgID, &ts, &mediaType, &mediaTitle, &mediaPath, &mediaSize); err != nil {
+			return nil, err
+		}
+		m.ChatName = chatName.String
+		m.MessageID = msgID.String
+		m.Time = unixToISO(ts)
+		m.MediaType = mediaType.String
+		m.MediaTitle = mediaTitle.String
+		m.MediaPath = mediaPath.String
+		m.MediaSize = mediaSize.Int64
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // SearchHit is a single full-text search match.
 type SearchHit struct {
 	Chat     string `json:"chat"`

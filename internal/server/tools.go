@@ -183,6 +183,8 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 			Note:     "chat will reappear in tools after the next sync",
 		}, nil
 	})
+
+	registerDownloadMedia(server, db, exclusions)
 }
 
 // Result wrappers below keep every tool's structured output an object with a

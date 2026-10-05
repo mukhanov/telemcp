@@ -130,6 +130,7 @@ Any other MCP client (stdio):
 | `get_sync_config` | Show chats excluded from synchronization |
 | `exclude_chat` | Exclude a chat: removed from the archive immediately and hidden from all tools |
 | `include_chat` | Stop excluding a chat; history returns on the next sync |
+| `download_media` | Download a message's media — or a chat's recent media — into a local folder |
 
 Kind filters: `list_chats`, `get_messages` and `search_messages` take
 `kinds` (include list) or `exclude_kinds` (omit list) over the chat kinds
@@ -142,9 +143,24 @@ Search notes: plain words match by prefix, so Russian inflections work —
 `договор` finds *договорились*, *договорённости*. FTS5 syntax also works:
 `"quoted phrase"`, `prefix*`, `sender:NAME`, `chat:NAME`, `OR`.
 
+Media downloads: `download_media` copies files out of the archive without
+ever writing to it. `chat` is required; pass `message` to fetch one message's
+media, or omit it to grab the chat's most recent media messages (`limit`,
+default 20, max 100; optional `types` filter such as `photo` or `document`).
+Files land in `dest` (default `~/Downloads/telemcp/<chat>`) named
+`<message-id>_<filename>`. Source order: media already archived by
+`--fetch-media` is copied straight from disk; the rest is downloaded through
+the running `telemcp watch` daemon's connection (local control socket
+`<archive dir>/watch.sock`); with no daemon the server opens its own
+short-lived tdata session under the same connection lock the sync commands
+use (`TELEMCP_SOURCE` overrides the tdata path, mirroring `--path`). Each
+file reports a status: `archived`, `downloaded`, `no_media`, `not_found`,
+`too_large`, `timeout` or `error`. `max_mb` caps per-file Telegram downloads.
+
 Chat and sender arguments accept either the id (from `list_chats`) or the
-exact display name. Time arguments accept RFC3339 or `YYYY-MM-DD`. All tools
-are strictly read-only; the MCP server never writes to the archive.
+exact display name. Time arguments accept RFC3339 or `YYYY-MM-DD`. Every tool
+is read-only toward the archive; `download_media` writes only to the
+destination folder you name.
 
 ## Sync exclusions
 

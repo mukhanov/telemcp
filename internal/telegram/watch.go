@@ -165,12 +165,28 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 		}
 
 		g, gctx := errgroup.WithContext(ctx)
+		// One shared fetcher for the control socket: dialog peer cache is
+		// per instance, and it is safe for concurrent use.
+		mediaFetch := NewMediaFetcherWithHashes(handler.raw, self.ID, daemonPeerHashes{st: stateStore, userID: self.ID})
 		g.Go(func() error {
 			handler.bootstrapChannelPts(ctx, stateStore)
 			return manager.Run(gctx, handler.raw, self.ID, updates.AuthOptions{})
 		})
 		g.Go(func() error {
 			handler.reconcileLoop(gctx, opts, dbPath)
+			return nil
+		})
+		g.Go(func() error {
+			cleanupControl, err := serveControlSocket(gctx, dbPath, mediaFetch, handler.logf)
+			if err != nil {
+				// Downloads still work without the socket (the MCP server
+				// falls back to an ephemeral connection); never fatal.
+				handler.logf("watch: media requests unavailable: %v\n", err)
+				return nil
+			}
+			handler.logf("watch: media requests on %s\n", ControlSocketPath(dbPath))
+			defer cleanupControl()
+			<-gctx.Done()
 			return nil
 		})
 		return g.Wait()
@@ -540,6 +556,29 @@ func acquireWatchLock(dbPath string) (func() error, error) {
 		defer f.Close()
 		return unix.Flock(int(f.Fd()), unix.LOCK_UN)
 	}, nil
+}
+
+// AcquireConnectionLock exposes the archive connection guard: an exclusive
+// non-blocking flock on <dbdir>/watch.lock. Media downloads that open an
+// ephemeral Telegram connection (DownloadViaTData) take it so they cannot
+// race the watch daemon on the same auth key.
+func AcquireConnectionLock(dbPath string) (func() error, error) {
+	return acquireWatchLock(dbPath)
+}
+
+// daemonPeerHashes serves PeerHashStore from the daemon's persisted updates
+// state, bound to the daemon's own user id.
+type daemonPeerHashes struct {
+	st     *sqliteUpdatesState
+	userID int64
+}
+
+func (d daemonPeerHashes) ChannelAccessHash(ctx context.Context, channelID int64) (int64, bool, error) {
+	return d.st.GetChannelAccessHash(ctx, d.userID, channelID)
+}
+
+func (d daemonPeerHashes) UserAccessHash(ctx context.Context, userID int64) (int64, bool, error) {
+	return d.st.GetUserAccessHash(ctx, d.userID, userID)
 }
 
 // WatchLockHeld reports whether a watch daemon currently holds the archive
