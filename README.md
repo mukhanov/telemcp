@@ -25,7 +25,13 @@ Telegram ◄──MTProto── telemcp watch                telemcp            
 
 ## Install
 
-From source (any OS with Telegram Desktop):
+Homebrew (macOS):
+
+```sh
+brew install mukhanov/telemcp/telemcp
+```
+
+or from source (any OS with Telegram Desktop):
 
 ```sh
 go install github.com/mukhanov/telemcp/cmd/telemcp@latest
