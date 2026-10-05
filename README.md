@@ -13,7 +13,7 @@ as-is.
 
 ```
 Telegram ◄──MTProto── telemcp watch                telemcp            MCP client
-                     (resident daemon) ──► ~/.telecrawl/telecrawl.db ──► Claude …
+                     (resident daemon) ──► ~/.telemcp/telemcp.db ──► Claude …
                                           (SQLite, WAL)   read-only stdio
 ```
 
@@ -30,7 +30,7 @@ git clone <repo> && cd telemcp
 go build -o bin/telemcp ./cmd/telemcp
 ```
 
-The archive lives at `~/.telecrawl/telecrawl.db` by default; every
+The archive lives at `~/.telemcp/telemcp.db` by default; every
 subcommand takes `--db` to point elsewhere, and the MCP server resolves the
 path from its first CLI argument, the `TELEMCP_DB` environment variable, or
 the same default.
@@ -50,7 +50,7 @@ the same default.
 
   ```sh
   sed -e "s|__TELEMCP_BIN__|$PWD/bin/telemcp|" \
-      -e "s|__LOG__|$HOME/.telecrawl/watch.log|g" \
+      -e "s|__LOG__|$HOME/.telemcp/watch.log|g" \
       -e "s|com\.example\.telemcp-watch|com.$USER.telemcp-watch|" \
       contrib/com.example.telemcp-watch.plist > ~/Library/LaunchAgents/com.$USER.telemcp-watch.plist
   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.telemcp-watch.plist

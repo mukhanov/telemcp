@@ -33,11 +33,11 @@ func DefaultPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".telecrawl", "telecrawl.db"), nil
+	return filepath.Join(home, ".telemcp", "telemcp.db"), nil
 }
 
 // Open opens the telemcp archive at path (empty means the default
-// ~/.telecrawl/telecrawl.db). The connection is read-only when possible;
+// ~/.telemcp/telemcp.db). The connection is read-only when possible;
 // telemcp only ever issues SELECTs.
 func Open(path string) (*DB, error) {
 	if path == "" {

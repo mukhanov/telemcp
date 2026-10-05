@@ -591,7 +591,7 @@ func usageErr(err error) error {
 func defaultDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "telecrawl.db"
+		return "telemcp.db"
 	}
-	return filepath.Join(home, ".telecrawl", "telecrawl.db")
+	return filepath.Join(home, ".telemcp", "telemcp.db")
 }

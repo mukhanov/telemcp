@@ -3,7 +3,7 @@
 // a read-only MCP server (default mode) exposing the archive to AI clients.
 //
 // The database path for the MCP server comes from the first CLI argument, the
-// TELEMCP_DB environment variable, or the default ~/.telecrawl/telecrawl.db.
+// TELEMCP_DB environment variable, or the default ~/.telemcp/telemcp.db.
 // The sync subcommands accept global flags (--db, --json, --source) before
 // the subcommand name.
 package main
