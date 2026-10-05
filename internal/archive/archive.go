@@ -14,7 +14,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// DB is a read-only handle to a telecrawl SQLite archive.
+// DB is a read-only handle to a telemcp SQLite archive (format shared
+// with telecrawl).
 type DB struct {
 	sql  *sql.DB
 	path string
@@ -26,7 +27,7 @@ const (
 	maxTextRunes = 2000
 )
 
-// DefaultPath returns the default telecrawl database location.
+// DefaultPath returns the default archive database location.
 func DefaultPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -35,7 +36,7 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".telecrawl", "telecrawl.db"), nil
 }
 
-// Open opens the telecrawl archive at path (empty means the default
+// Open opens the telemcp archive at path (empty means the default
 // ~/.telecrawl/telecrawl.db). The connection is read-only when possible;
 // telemcp only ever issues SELECTs.
 func Open(path string) (*DB, error) {
@@ -48,7 +49,7 @@ func Open(path string) (*DB, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("telecrawl database not found at %s; run 'telecrawl import' first", path)
+			return nil, fmt.Errorf("telemcp database not found at %s; run 'telemcp import' first", path)
 		}
 		return nil, err
 	}
@@ -91,7 +92,7 @@ func (d *DB) checkSchema() error {
 	var n int
 	err := d.sql.QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('messages', 'chats')").Scan(&n)
 	if err != nil || n < 2 {
-		return fmt.Errorf("%s is not a telecrawl archive (messages/chats tables missing); run 'telecrawl import' first", d.path)
+		return fmt.Errorf("%s is not a telemcp archive (messages/chats tables missing); run 'telemcp import' first", d.path)
 	}
 	return nil
 }
@@ -178,7 +179,7 @@ func (d *DB) resolveFolder(ctx context.Context, folder string) (string, error) {
 		"SELECT id FROM folders WHERE deleted_at IS NULL AND (id = ? OR title = ?) LIMIT 1",
 		folder, folder).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("folder %q not found; list folders with 'telecrawl folders'", folder)
+		return "", fmt.Errorf("folder %q not found; use the folder id or title shown in chat listings", folder)
 	}
 	return id, err
 }

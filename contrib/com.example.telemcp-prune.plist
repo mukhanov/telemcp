@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Template: prune chats excluded via telemcp from the archive while
-     'telecrawl watch' keeps it fresh (see the telecrawl watch contrib
+     'telemcp watch' keeps it fresh (see the telemcp watch contrib
      template). Replace __TELEMCP_BIN__ (telemcp binary), __LOG__ (log file
      path) and the Label (com.example → your user), then copy to
      ~/Library/LaunchAgents/ and run:

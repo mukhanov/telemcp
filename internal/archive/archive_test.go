@@ -88,8 +88,8 @@ func newTestDB(t *testing.T) *DB {
 
 func TestOpenMissingDB(t *testing.T) {
 	_, err := Open(filepath.Join(t.TempDir(), "absent.db"))
-	if err == nil || !strings.Contains(err.Error(), "telecrawl import") {
-		t.Fatalf("error = %v, want hint to run telecrawl import", err)
+	if err == nil || !strings.Contains(err.Error(), "telemcp import") {
+		t.Fatalf("error = %v, want hint to run telemcp import", err)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestOpenNotArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	sqlDB.Close()
-	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "not a telecrawl archive") {
-		t.Fatalf("error = %v, want not-a-telecrawl-archive error", err)
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "not a telemcp archive") {
+		t.Fatalf("error = %v, want not-a-telemcp-archive error", err)
 	}
 }
 

@@ -1,12 +1,10 @@
-// Command telemcp exposes a local telecrawl archive (SQLite) to MCP clients
-// as read-only tools: chats, messages, forum topics, and full-text search.
+// Command telemcp is the full local Telegram archive stack: a live-sync
+// daemon (watch), one-shot imports (import), archive maintenance (prune), and
+// a read-only MCP server (default mode) exposing the archive to AI clients.
 //
 // The database path comes from the first CLI argument, the TELEMCP_DB
-// environment variable, or the telecrawl default ~/.telecrawl/telecrawl.db.
-//
-// The prune subcommand removes chats excluded in the telemcp config from the
-// archive; run it periodically while 'telecrawl watch' keeps the archive
-// fresh (see contrib/ for a launchd example).
+// environment variable, or the default ~/.telecrawl/telecrawl.db. The sync
+// subcommands take their own --db flag.
 package main
 
 import (
@@ -20,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"telemcp/internal/archive"
+	"telemcp/internal/cli"
 	"telemcp/internal/config"
 	"telemcp/internal/server"
 )
@@ -30,11 +29,24 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr) // stdout carries the MCP stdio transport
 
-	if len(os.Args) > 1 && os.Args[1] == "prune" {
-		if err := runPrune(context.Background()); err != nil {
-			log.Fatalf("telemcp prune: %v", err)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "prune":
+			if err := runPrune(context.Background()); err != nil {
+				log.Fatalf("telemcp prune: %v", err)
+			}
+			return
+		case "watch", "import", "sync":
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			err := cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+			stop()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "telemcp:", err)
+				os.Exit(cli.ExitCode(err))
+			}
+			return
 		}
-		return
 	}
 
 	dbPath := os.Getenv("TELEMCP_DB")

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template: resident live-sync daemon. Keeps ~/.telecrawl/telecrawl.db
+     fresh by holding one tdata-authorized MTProto connection: new messages
+     land in the archive within seconds, periodic reconcile passes cover
+     edits, counters and media. Replace __TELEMCP_BIN__ (telemcp binary) and
+     __LOG__ (log file path), adjust the Label (com.example → your user),
+     then copy to ~/Library/LaunchAgents/ and run:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<name>.plist
+     Only one daemon may hold the archive's watch.lock at a time — stop any
+     other watcher for the same database before bootstrapping this one.
+     Adjust --messages-limit (reconcile depth) and --reconcile-every to
+     taste; ThrottleInterval delays restarts after crashes. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.telemcp-watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__TELEMCP_BIN__</string>
+        <string>watch</string>
+        <string>--messages-limit</string>
+        <string>100</string>
+        <string>--reconcile-every</string>
+        <string>30m</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>__LOG__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG__</string>
+</dict>
+</plist>

@@ -1,24 +1,26 @@
 # telemcp
 
-Read-only [MCP](https://modelcontextprotocol.io) server that exposes a local
-[telecrawl](https://github.com/openclaw/telecrawl) Telegram archive to AI
-clients: chats, messages, forum topics, and full-text search.
+Self-sufficient local Telegram archive: a resident live-sync daemon
+(`watch`), one-shot imports (`import`), archive maintenance (`prune`), and a
+read-only [MCP](https://modelcontextprotocol.io) server exposing the archive
+to AI clients — chats, messages, forum topics, and full-text search. One
+binary, one repo, no cloud middleman.
 
-Keep your Telegram history in a local SQLite archive with `telecrawl`, then
-let any MCP client (Claude Code, Claude Desktop, …) read it — build digests,
-summarize work agreements, search decisions, without a cloud middleman.
+The live-sync stack is a port from
+[openclaw/telecrawl](https://github.com/openclaw/telecrawl) (branch `watch`);
+the SQLite format is shared, so an existing telecrawl archive keeps working
+as-is.
 
 ```
-telecrawl watch (resident daemon)          telemcp                    MCP client
-──────────────────────────────►  ~/.telecrawl/telecrawl.db ──────────► Claude …
-                                  (SQLite, WAL)      read-only stdio
+Telegram ◄──MTProto── telemcp watch                telemcp            MCP client
+                     (resident daemon) ──► ~/.telecrawl/telecrawl.db ──► Claude …
+                                          (SQLite, WAL)   read-only stdio
 ```
 
 ## Requirements
 
-- [telecrawl](https://github.com/openclaw/telecrawl) installed, and at least
-  one successful import so the archive exists at
-  `~/.telecrawl/telecrawl.db`
+- [Telegram Desktop](https://telegram.org) installed and logged in at least
+  once — the sync authorizes through its local session (`tdata`)
 - Go 1.24+ to build from source
 
 ## Install
@@ -28,10 +30,58 @@ git clone <repo> && cd telemcp
 go build -o bin/telemcp ./cmd/telemcp
 ```
 
-The database path is resolved from the first CLI argument, the `TELEMCP_DB`
-environment variable, or the telecrawl default `~/.telecrawl/telecrawl.db`.
+The archive lives at `~/.telecrawl/telecrawl.db` by default; every
+subcommand takes `--db` to point elsewhere, and the MCP server resolves the
+path from its first CLI argument, the `TELEMCP_DB` environment variable, or
+the same default.
 
-## Configure
+## Keeping the archive fresh
+
+- **`telemcp watch`** (recommended): a resident daemon holding one
+  tdata-authorized MTProto connection — new messages land in the archive
+  within seconds, and periodic full reconcile passes on the same connection
+  cover what the live path defers (edits, counters, media, chat metadata).
+
+  ```sh
+  bin/telemcp watch --messages-limit 100 --reconcile-every 30m
+  ```
+
+  Run it under launchd — template in `contrib/`:
+
+  ```sh
+  sed -e "s|__TELEMCP_BIN__|$PWD/bin/telemcp|" \
+      -e "s|__LOG__|$HOME/.telecrawl/watch.log|g" \
+      -e "s|com\.example\.telemcp-watch|com.$USER.telemcp-watch|" \
+      contrib/com.example.telemcp-watch.plist > ~/Library/LaunchAgents/com.$USER.telemcp-watch.plist
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.telemcp-watch.plist
+  ```
+
+  Only one daemon may hold the archive's `watch.lock` at a time — stop any
+  other watcher for the same database first. A manual `telemcp import`
+  refuses to run while the daemon holds the lock.
+
+- **`telemcp import`** on a schedule (cron/launchd): repeated imports merge
+  idempotently (no duplicates); `--messages-limit 100` keeps periodic syncs
+  fast.
+
+  ```sh
+  bin/telemcp import                 # first run: full history import
+  bin/telemcp import --messages-limit 100   # later: fast top-up
+  ```
+
+Useful flags (both subcommands): `--path` to point at a non-default tdata
+directory, `--dialogs-limit`/`--messages-limit` to bound the initial fetch,
+`--fetch-media` with `--fetch-media-max-age`/`--fetch-media-max-mb` to
+archive photos, videos and documents alongside the messages. `--json`
+switches the output to machine-readable stats.
+
+Reading the database while a sync runs is safe (WAL).
+
+Excluded chats (see below) can linger between syncs; a small launchd job
+runs `telemcp prune` to delete them from the archive — template in
+`contrib/`.
+
+## Configure MCP access
 
 Claude Code:
 
@@ -70,34 +120,7 @@ Search notes: plain words match by prefix, so Russian inflections work —
 
 Chat and sender arguments accept either the id (from `list_chats`) or the
 exact display name. Time arguments accept RFC3339 or `YYYY-MM-DD`. All tools
-are strictly read-only; telemcp never writes to the archive.
-
-## Keeping the archive fresh
-
-telemcp reads whatever the last sync left behind. Two ways to keep it fresh:
-
-- **`telecrawl watch`** (recommended): a resident daemon holding one
-  tdata-authorized MTProto connection — new messages land in the archive
-  within seconds, with periodic full reconcile passes on the same
-  connection. Needs a telecrawl build that includes `watch`; until it ships
-  upstream, use the branch from the telecrawl repository.
-- **`telecrawl import` on a schedule** (cron/launchd): repeated imports
-  merge idempotently (no duplicates); `--messages-limit 100` keeps periodic
-  syncs fast.
-
-Reading the database while a sync runs is safe (WAL).
-
-Excluded chats (see below) can linger between syncs; a small launchd job
-runs `telemcp prune` to delete them from the archive — template in
-`contrib/`:
-
-```sh
-sed -e "s|__TELEMCP_BIN__|$PWD/bin/telemcp|" \
-    -e "s|__LOG__|$HOME/.telecrawl/prune.log|g" \
-    -e "s|com\.example\.telemcp-prune|com.$USER.telemcp-prune|" \
-    contrib/com.example.telemcp-prune.plist > ~/Library/LaunchAgents/com.$USER.telemcp-prune.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.telemcp-prune.plist
-```
+are strictly read-only; the MCP server never writes to the archive.
 
 ## Sync exclusions
 
@@ -116,11 +139,14 @@ the exclusion and the chat's history reappears after the next sync.
 ## Project layout
 
 ```
-cmd/telemcp/       entry point: MCP stdio server + the prune subcommand
-internal/archive/  read-only archive access: queries, FTS search, prune
-internal/config/   exclusion config (managed via MCP tools)
-internal/server/   MCP tool wiring
-contrib/           launchd templates
+cmd/telemcp/          entry point: MCP server (default) + watch/import/prune
+internal/archive/     read-only archive access for MCP: queries, FTS search, prune
+internal/config/      exclusion config (managed via MCP tools)
+internal/server/      MCP tool wiring
+internal/store/       archive writer: schema, idempotent merges, tombstones
+internal/telegram/    tdata session, live updates, import (telecrawl watch port)
+internal/cli/         watch/import subcommands, media staging
+contrib/              launchd templates (watch, prune)
 ```
 
 ## Development

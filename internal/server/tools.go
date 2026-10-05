@@ -28,7 +28,7 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_status",
-		Description: "Report telecrawl archive freshness: database path, last import time, counts of chats/messages/topics, newest message time. Call this first to learn how fresh the Telegram data is.",
+		Description: "Report archive freshness: database path, last import time, counts of chats/messages/topics, newest message time. Call this first to learn how fresh the Telegram data is.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, *archive.Status, error) {
 		st, err := db.Status(ctx)
 		if err != nil {
@@ -39,7 +39,7 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_chats",
-		Description: "List Telegram chats in the local telecrawl archive, most recently active first. Use the returned chat id in get_messages, search_messages and list_topics. Chats excluded from sync (see get_sync_config) are not listed.",
+		Description: "List Telegram chats in the local archive, most recently active first. Use the returned chat id in get_messages, search_messages and list_topics. Chats excluded from sync (see get_sync_config) are not listed.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args listChatsArgs) (*mcp.CallToolResult, *ChatsResult, error) {
 		chats, err := db.Chats(ctx, archive.ChatFilter{
 			Limit:      args.Limit,
@@ -54,7 +54,7 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_messages",
-		Description: "Read messages from the local telecrawl archive with filters: chat, sender, forum topic, time range, direction. Newest first unless asc=true. Combine after/before with a chat id for a timeline.",
+		Description: "Read messages from the local archive with filters: chat, sender, forum topic, time range, direction. Newest first unless asc=true. Combine after/before with a chat id for a timeline.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args getMessagesArgs) (*mcp.CallToolResult, *MessagesResult, error) {
 		messages, err := db.Messages(ctx, archive.MessageFilter{
 			Chat:   args.Chat,
@@ -85,7 +85,7 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_topics",
-		Description: "List forum topics of a Telegram chat from the local telecrawl archive, pinned first. Use topic ids in get_messages topic filter.",
+		Description: "List forum topics of a Telegram chat from the local archive, pinned first. Use topic ids in get_messages topic filter.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args listTopicsArgs) (*mcp.CallToolResult, *TopicsResult, error) {
 		topics, err := db.Topics(ctx, args.Chat, args.Limit, exclusions()...)
 		if err != nil {
@@ -110,7 +110,7 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "exclude_chat",
-		Description: "Exclude a chat from synchronization: it is immediately removed from the archive (messages, topics, media) and hidden from all telemcp tools. Use for archived chats or contacts you do not want tracked. Reversible with include_chat; data returns after the next telecrawl import.",
+		Description: "Exclude a chat from synchronization: it is immediately removed from the archive (messages, topics, media) and hidden from all telemcp tools. Use for archived chats or contacts you do not want tracked. Reversible with include_chat; data returns after the next sync.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args excludeChatArgs) (*mcp.CallToolResult, *ExcludeResult, error) {
 		configMu.Lock()
 		defer configMu.Unlock()
@@ -138,7 +138,7 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "include_chat",
-		Description: "Stop excluding a chat from synchronization (accepts the chat id or its name). Its history reappears after the next telecrawl import.",
+		Description: "Stop excluding a chat from synchronization (accepts the chat id or its name). Its history reappears after the next sync.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args includeChatArgs) (*mcp.CallToolResult, *IncludeResult, error) {
 		configMu.Lock()
 		defer configMu.Unlock()
@@ -155,7 +155,7 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 		}
 		return &mcp.CallToolResult{}, &IncludeResult{
 			Restored: entry,
-			Note:     "chat will reappear in tools after the next telecrawl import",
+			Note:     "chat will reappear in tools after the next sync",
 		}, nil
 	})
 }
@@ -203,7 +203,7 @@ type IncludeResult struct {
 
 type listChatsArgs struct {
 	Limit      int    `json:"limit,omitempty" jsonschema:"max chats to return; default 50, max 500"`
-	Folder     string `json:"folder,omitempty" jsonschema:"filter by folder id or title (see 'telecrawl folders')"`
+	Folder     string `json:"folder,omitempty" jsonschema:"filter by folder id or title"`
 	UnreadOnly bool   `json:"unread_only,omitempty" jsonschema:"only chats with unread messages"`
 }
 
