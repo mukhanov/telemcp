@@ -1,4 +1,4 @@
-package main
+package archive
 
 import (
 	"context"
@@ -26,8 +26,8 @@ const (
 	maxTextRunes = 2000
 )
 
-// defaultDBPath returns the default telecrawl database location.
-func defaultDBPath() (string, error) {
+// DefaultPath returns the default telecrawl database location.
+func DefaultPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -41,7 +41,7 @@ func defaultDBPath() (string, error) {
 func Open(path string) (*DB, error) {
 	if path == "" {
 		var err error
-		if path, err = defaultDBPath(); err != nil {
+		if path, err = DefaultPath(); err != nil {
 			return nil, err
 		}
 	}

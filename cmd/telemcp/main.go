@@ -5,8 +5,8 @@
 // environment variable, or the telecrawl default ~/.telecrawl/telecrawl.db.
 //
 // The prune subcommand removes chats excluded in the telemcp config from the
-// archive; run it after each telecrawl import (see contrib/ for a launchd
-// example).
+// archive; run it periodically while 'telecrawl watch' keeps the archive
+// fresh (see contrib/ for a launchd example).
 package main
 
 import (
@@ -18,6 +18,10 @@ import (
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"telemcp/internal/archive"
+	"telemcp/internal/config"
+	"telemcp/internal/server"
 )
 
 const version = "0.2.1"
@@ -37,23 +41,23 @@ func main() {
 	if dbPath == "" && len(os.Args) > 1 {
 		dbPath = os.Args[1]
 	}
-	db, err := Open(dbPath)
+	db, err := archive.Open(dbPath)
 	if err != nil {
 		log.Fatalf("telemcp: %v", err)
 	}
 	defer db.Close()
 
-	configPath, err := defaultConfigPath()
+	configPath, err := config.DefaultPath()
 	if err != nil {
 		log.Fatalf("telemcp: %v", err)
 	}
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "telemcp", Version: version}, nil)
-	registerTools(server, db, configPath)
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "telemcp", Version: version}, nil)
+	server.Register(mcpServer, db, configPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
+	if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("telemcp: %v", err)
 	}
 }
@@ -64,15 +68,15 @@ func runPrune(ctx context.Context) error {
 	dbPath := os.Getenv("TELEMCP_DB")
 	if dbPath == "" {
 		var err error
-		if dbPath, err = defaultDBPath(); err != nil {
+		if dbPath, err = archive.DefaultPath(); err != nil {
 			return err
 		}
 	}
-	configPath, err := defaultConfigPath()
+	configPath, err := config.DefaultPath()
 	if err != nil {
 		return err
 	}
-	cfg, err := loadConfig(configPath)
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
@@ -80,7 +84,7 @@ func runPrune(ctx context.Context) error {
 		fmt.Println("telemcp prune: no chats excluded, nothing to do")
 		return nil
 	}
-	res, err := Prune(ctx, dbPath, cfg.excludedIDs())
+	res, err := archive.Prune(ctx, dbPath, cfg.ExcludedIDs())
 	if err != nil {
 		return err
 	}

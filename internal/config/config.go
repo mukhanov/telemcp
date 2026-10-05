@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -23,9 +23,9 @@ type Config struct {
 	ExcludeChats []ChatExclusion `json:"exclude_chats,omitempty"`
 }
 
-// defaultConfigPath returns the config location: $TELEMCP_CONFIG, else
+// DefaultPath returns the config location: $TELEMCP_CONFIG, else
 // <os.UserConfigDir>/telemcp/config.json.
-func defaultConfigPath() (string, error) {
+func DefaultPath() (string, error) {
 	if p := os.Getenv("TELEMCP_CONFIG"); p != "" {
 		return p, nil
 	}
@@ -36,8 +36,8 @@ func defaultConfigPath() (string, error) {
 	return filepath.Join(dir, "telemcp", "config.json"), nil
 }
 
-// loadConfig reads the config; a missing file is an empty config.
-func loadConfig(path string) (Config, error) {
+// Load reads the config; a missing file is an empty config.
+func Load(path string) (Config, error) {
 	var c Config
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -52,8 +52,8 @@ func loadConfig(path string) (Config, error) {
 	return c, nil
 }
 
-// saveConfig writes the config atomically.
-func saveConfig(path string, c Config) error {
+// Save writes the config atomically.
+func Save(path string, c Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -68,8 +68,8 @@ func saveConfig(path string, c Config) error {
 	return os.Rename(tmp, path)
 }
 
-// excludedIDs returns the chat ids to keep out of queries and the archive.
-func (c Config) excludedIDs() []string {
+// ExcludedIDs returns the chat ids to keep out of queries and the archive.
+func (c Config) ExcludedIDs() []string {
 	ids := make([]string, 0, len(c.ExcludeChats))
 	for _, e := range c.ExcludeChats {
 		ids = append(ids, e.ID)
@@ -87,8 +87,8 @@ func (c Config) isExcluded(id string) bool {
 	return false
 }
 
-// exclude adds a chat to the exclusion list and returns the created entry.
-func (c *Config) exclude(id, name, reason string) (ChatExclusion, error) {
+// Exclude adds a chat to the exclusion list and returns the created entry.
+func (c *Config) Exclude(id, name, reason string) (ChatExclusion, error) {
 	if c.isExcluded(id) {
 		return ChatExclusion{}, fmt.Errorf("chat %s (%s) is already excluded", id, name)
 	}
@@ -102,8 +102,8 @@ func (c *Config) exclude(id, name, reason string) (ChatExclusion, error) {
 	return entry, nil
 }
 
-// include removes a chat (matched by id or name) from the exclusion list.
-func (c *Config) include(idOrName string) (ChatExclusion, error) {
+// Include removes a chat (matched by id or name) from the exclusion list.
+func (c *Config) Include(idOrName string) (ChatExclusion, error) {
 	for i, e := range c.ExcludeChats {
 		if e.ID == idOrName || e.Name == idOrName {
 			c.ExcludeChats = append(c.ExcludeChats[:i], c.ExcludeChats[i+1:]...)

@@ -1,31 +1,35 @@
-package main
+// Package server wires the archive tools onto an MCP server.
+package server
 
 import (
 	"context"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"telemcp/internal/archive"
+	"telemcp/internal/config"
 )
 
 // configMu serializes read-modify-write cycles on the config file: MCP tool
 // calls may run concurrently.
 var configMu sync.Mutex
 
-// registerTools wires the archive tools onto the MCP server. Query tools hide
+// Register wires the archive tools onto the MCP server. Query tools hide
 // chats excluded in the config at configPath; exclude_chat prunes them.
-func registerTools(server *mcp.Server, db *DB, configPath string) {
+func Register(server *mcp.Server, db *archive.DB, configPath string) {
 	exclusions := func() []string {
-		cfg, err := loadConfig(configPath)
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return nil
 		}
-		return cfg.excludedIDs()
+		return cfg.ExcludedIDs()
 	}
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_status",
 		Description: "Report telecrawl archive freshness: database path, last import time, counts of chats/messages/topics, newest message time. Call this first to learn how fresh the Telegram data is.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, *Status, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, *archive.Status, error) {
 		st, err := db.Status(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -37,7 +41,7 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 		Name:        "list_chats",
 		Description: "List Telegram chats in the local telecrawl archive, most recently active first. Use the returned chat id in get_messages, search_messages and list_topics. Chats excluded from sync (see get_sync_config) are not listed.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args listChatsArgs) (*mcp.CallToolResult, *ChatsResult, error) {
-		chats, err := db.Chats(ctx, ChatFilter{
+		chats, err := db.Chats(ctx, archive.ChatFilter{
 			Limit:      args.Limit,
 			Folder:     args.Folder,
 			UnreadOnly: args.UnreadOnly,
@@ -52,7 +56,7 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 		Name:        "get_messages",
 		Description: "Read messages from the local telecrawl archive with filters: chat, sender, forum topic, time range, direction. Newest first unless asc=true. Combine after/before with a chat id for a timeline.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args getMessagesArgs) (*mcp.CallToolResult, *MessagesResult, error) {
-		messages, err := db.Messages(ctx, MessageFilter{
+		messages, err := db.Messages(ctx, archive.MessageFilter{
 			Chat:   args.Chat,
 			Sender: args.Sender,
 			Topic:  args.Topic,
@@ -94,12 +98,12 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 		Name:        "get_sync_config",
 		Description: "Show sync configuration: chats excluded from synchronization. Excluded chats are hidden from every telemcp tool and removed from the archive. Manage with exclude_chat and include_chat.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, *SyncConfig, error) {
-		cfg, err := loadConfig(configPath)
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return nil, nil, err
 		}
 		if cfg.ExcludeChats == nil {
-			cfg.ExcludeChats = []ChatExclusion{}
+			cfg.ExcludeChats = []config.ChatExclusion{}
 		}
 		return &mcp.CallToolResult{}, &SyncConfig{ExcludeChats: cfg.ExcludeChats}, nil
 	})
@@ -110,7 +114,7 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args excludeChatArgs) (*mcp.CallToolResult, *ExcludeResult, error) {
 		configMu.Lock()
 		defer configMu.Unlock()
-		cfg, err := loadConfig(configPath)
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -118,14 +122,14 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 		if err != nil {
 			return nil, nil, err
 		}
-		entry, err := cfg.exclude(id, name, args.Reason)
+		entry, err := cfg.Exclude(id, name, args.Reason)
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := saveConfig(configPath, cfg); err != nil {
+		if err := config.Save(configPath, cfg); err != nil {
 			return nil, nil, err
 		}
-		pruned, err := Prune(ctx, db.Path(), []string{id})
+		pruned, err := archive.Prune(ctx, db.Path(), []string{id})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -138,15 +142,15 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args includeChatArgs) (*mcp.CallToolResult, *IncludeResult, error) {
 		configMu.Lock()
 		defer configMu.Unlock()
-		cfg, err := loadConfig(configPath)
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return nil, nil, err
 		}
-		entry, err := cfg.include(args.Chat)
+		entry, err := cfg.Include(args.Chat)
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := saveConfig(configPath, cfg); err != nil {
+		if err := config.Save(configPath, cfg); err != nil {
 			return nil, nil, err
 		}
 		return &mcp.CallToolResult{}, &IncludeResult{
@@ -162,39 +166,39 @@ func registerTools(server *mcp.Server, db *DB, configPath string) {
 
 // ChatsResult wraps list_chats output.
 type ChatsResult struct {
-	Chats []Chat `json:"chats"`
+	Chats []archive.Chat `json:"chats"`
 }
 
 // MessagesResult wraps get_messages output.
 type MessagesResult struct {
-	Messages []Message `json:"messages"`
+	Messages []archive.Message `json:"messages"`
 }
 
 // SearchResult wraps search_messages output.
 type SearchResult struct {
-	Hits []SearchHit `json:"hits"`
+	Hits []archive.SearchHit `json:"hits"`
 }
 
 // TopicsResult wraps list_topics output.
 type TopicsResult struct {
-	Topics []Topic `json:"topics"`
+	Topics []archive.Topic `json:"topics"`
 }
 
 // SyncConfig is the sync configuration exposed to clients.
 type SyncConfig struct {
-	ExcludeChats []ChatExclusion `json:"exclude_chats"`
+	ExcludeChats []config.ChatExclusion `json:"exclude_chats"`
 }
 
 // ExcludeResult reports a chat exclusion and what was removed from disk.
 type ExcludeResult struct {
-	Excluded ChatExclusion `json:"excluded"`
-	Pruned   *PruneResult  `json:"pruned"`
+	Excluded config.ChatExclusion `json:"excluded"`
+	Pruned   *archive.PruneResult `json:"pruned"`
 }
 
 // IncludeResult reports a chat restored to synchronization.
 type IncludeResult struct {
-	Restored ChatExclusion `json:"restored"`
-	Note     string        `json:"note,omitempty"`
+	Restored config.ChatExclusion `json:"restored"`
+	Note     string               `json:"note,omitempty"`
 }
 
 type listChatsArgs struct {

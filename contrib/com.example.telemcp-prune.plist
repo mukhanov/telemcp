@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template: prune chats excluded via telemcp from the archive while
+     'telecrawl watch' keeps it fresh (see the telecrawl watch contrib
+     template). Replace __TELEMCP_BIN__ (telemcp binary), __LOG__ (log file
+     path) and the Label (com.example → your user), then copy to
+     ~/Library/LaunchAgents/ and run:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<name>.plist
+     Adjust StartInterval (seconds) to taste. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.telemcp-prune</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-c</string>
+        <string>'__TELEMCP_BIN__' prune &gt;&gt; '__LOG__' 2&gt;&amp;1</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
