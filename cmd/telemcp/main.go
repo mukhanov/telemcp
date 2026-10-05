@@ -2,9 +2,10 @@
 // daemon (watch), one-shot imports (import), archive maintenance (prune), and
 // a read-only MCP server (default mode) exposing the archive to AI clients.
 //
-// The database path comes from the first CLI argument, the TELEMCP_DB
-// environment variable, or the default ~/.telecrawl/telecrawl.db. The sync
-// subcommands take their own --db flag.
+// The database path for the MCP server comes from the first CLI argument, the
+// TELEMCP_DB environment variable, or the default ~/.telecrawl/telecrawl.db.
+// The sync subcommands accept global flags (--db, --json, --source) before
+// the subcommand name.
 package main
 
 import (
@@ -29,8 +30,8 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr) // stdout carries the MCP stdio transport
 
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	if subcommand := detectSubcommand(os.Args[1:]); subcommand != "" {
+		switch subcommand {
 		case "prune":
 			if err := runPrune(context.Background()); err != nil {
 				log.Fatalf("telemcp prune: %v", err)
@@ -72,6 +73,20 @@ func main() {
 	if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("telemcp: %v", err)
 	}
+}
+
+// detectSubcommand finds the sync subcommand in args, tolerating global
+// flags before it (telemcp --db X import); it returns "" for MCP mode.
+func detectSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "prune", "watch", "import", "sync":
+			return args[i]
+		case "--db", "--source": // value-carrying globals: skip their values
+			i++
+		}
+	}
+	return ""
 }
 
 // runPrune removes all chats excluded in the config from the archive. It is
