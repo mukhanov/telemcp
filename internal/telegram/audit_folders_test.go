@@ -10,7 +10,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
-	"telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/store"
 )
 
 func TestAuditFolderErrorsAbortImport(t *testing.T) {

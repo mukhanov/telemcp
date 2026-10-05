@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -113,9 +114,11 @@ type Chat struct {
 
 // ChatFilter narrows Chats results.
 type ChatFilter struct {
-	Limit      int
-	Folder     string // folder id or title
-	UnreadOnly bool
+	Limit        int
+	Folder       string   // folder id or title
+	UnreadOnly   bool     // only chats with unread messages
+	Kinds        []string // only chats of these kinds (user, bot, group, channel)
+	ExcludeKinds []string // omit chats of these kinds
 }
 
 // Chats lists archived chats, most recently active first. Excluded chats
@@ -128,6 +131,9 @@ func (d *DB) Chats(ctx context.Context, f ChatFilter, excluded ...string) ([]Cha
 		where = []string{"c.deleted_at IS NULL"}
 	)
 	if clause := notIn("c.id", excluded, &args); clause != "" {
+		where = append(where, clause)
+	}
+	if clause := inListClause("c.kind", f.Kinds, f.ExcludeKinds, &args); clause != "" {
 		where = append(where, clause)
 	}
 	if f.UnreadOnly {
@@ -220,14 +226,16 @@ type Message struct {
 
 // MessageFilter narrows Messages results.
 type MessageFilter struct {
-	Chat   string // chat jid or exact chat name
-	Sender string // sender jid or exact sender name
-	Topic  string
-	After  string // RFC3339 or YYYY-MM-DD
-	Before string
-	FromMe *bool
-	Limit  int
-	Asc    bool
+	Chat         string // chat jid or exact chat name
+	Sender       string // sender jid or exact sender name
+	Topic        string
+	After        string // RFC3339 or YYYY-MM-DD
+	Before       string
+	FromMe       *bool
+	Kinds        []string // only messages from chats of these kinds
+	ExcludeKinds []string // omit messages from chats of these kinds
+	Limit        int
+	Asc          bool
 }
 
 // Messages reads archived messages matching the filter, newest first unless
@@ -239,11 +247,17 @@ func (d *DB) Messages(ctx context.Context, f MessageFilter, excluded ...string) 
 	if err := checkChatAllowed(ctx, d, f.Chat, excluded); err != nil {
 		return nil, err
 	}
+	if err := d.checkChatKinds(ctx, f.Chat, f.Kinds, f.ExcludeKinds); err != nil {
+		return nil, err
+	}
 	var (
 		args  []any
 		where = []string{"deleted_at IS NULL"}
 	)
 	if clause := notIn("chat_jid", excluded, &args); clause != "" {
+		where = append(where, clause)
+	}
+	if clause := chatKindJoin("chat_jid", f.Kinds, f.ExcludeKinds, &args); clause != "" {
 		where = append(where, clause)
 	}
 	if f.Chat != "" {
@@ -340,27 +354,42 @@ type SearchHit struct {
 	Text     string `json:"text,omitempty"`
 }
 
+// SearchFilter narrows Search results.
+type SearchFilter struct {
+	Query        string // FTS5 query; plain words become prefix terms
+	Chat         string // restrict to this chat jid or exact chat name
+	Kinds        []string
+	ExcludeKinds []string
+	Limit        int
+}
+
 // Search runs a full-text query over message text and returns matches with
 // highlighted snippets, newest first. Excluded chats are omitted.
-func (d *DB) Search(ctx context.Context, query, chat string, limit int, excluded ...string) ([]SearchHit, error) {
-	if strings.TrimSpace(query) == "" {
+func (d *DB) Search(ctx context.Context, f SearchFilter, excluded ...string) ([]SearchHit, error) {
+	if strings.TrimSpace(f.Query) == "" {
 		return nil, errors.New("empty search query")
 	}
-	if err := checkChatAllowed(ctx, d, chat, excluded); err != nil {
+	if err := checkChatAllowed(ctx, d, f.Chat, excluded); err != nil {
 		return nil, err
 	}
-	limit = clampLimit(limit, 20, searchLimit)
+	if err := d.checkChatKinds(ctx, f.Chat, f.Kinds, f.ExcludeKinds); err != nil {
+		return nil, err
+	}
+	limit := clampLimit(f.Limit, 20, searchLimit)
 	var (
 		args  []any
 		where = []string{"messages_fts MATCH ?", "m.deleted_at IS NULL"}
 	)
-	args = append(args, ftsQuery(query))
+	args = append(args, ftsQuery(f.Query))
 	if clause := notIn("m.chat_jid", excluded, &args); clause != "" {
 		where = append(where, clause)
 	}
-	if chat != "" {
+	if clause := chatKindJoin("m.chat_jid", f.Kinds, f.ExcludeKinds, &args); clause != "" {
+		where = append(where, clause)
+	}
+	if f.Chat != "" {
 		where = append(where, "(m.chat_jid = ? OR m.chat_name = ?)")
-		args = append(args, chat, chat)
+		args = append(args, f.Chat, f.Chat)
 	}
 	args = append(args, limit)
 	rows, err := d.sql.QueryContext(ctx, `
@@ -372,7 +401,7 @@ func (d *DB) Search(ctx context.Context, query, chat string, limit int, excluded
 		ORDER BY m.ts DESC LIMIT ?`, args...)
 	if err != nil {
 		if isFTSError(err) {
-			return nil, fmt.Errorf("invalid FTS query %q: use plain words, prefix*, \"quoted phrase\", or column filters like sender:NAME", query)
+			return nil, fmt.Errorf("invalid FTS query %q: use plain words, prefix*, \"quoted phrase\", or column filters like sender:NAME", f.Query)
 		}
 		return nil, err
 	}
@@ -590,12 +619,77 @@ func notIn(col string, excluded []string, args *[]any) string {
 	return col + " NOT IN (" + strings.Join(placeholders, ",") + ")"
 }
 
+// inListClause filters the chats table's kind column directly: an include
+// list when kinds is set, an omit list otherwise. It returns "" when neither
+// is given.
+func inListClause(kindCol string, kinds, excludeKinds []string, args *[]any) string {
+	switch {
+	case len(kinds) > 0:
+		return membership(kindCol, kinds, "IN", args)
+	case len(excludeKinds) > 0:
+		return membership(kindCol, excludeKinds, "NOT IN", args)
+	default:
+		return ""
+	}
+}
+
+// chatKindJoin filters a message table's chat id column by chat kind through
+// a subquery (chat ids are text on the message side, integer in chats).
+// Messages whose chat has no live chats row survive an omit list: nothing
+// asserts their kind.
+func chatKindJoin(jidCol string, kinds, excludeKinds []string, args *[]any) string {
+	op := ""
+	vals := kinds
+	if len(kinds) > 0 {
+		op = "IN"
+	} else if len(excludeKinds) > 0 {
+		op, vals = "NOT IN", excludeKinds
+	} else {
+		return ""
+	}
+	return jidCol + " " + op + " (SELECT CAST(id AS TEXT) FROM chats WHERE deleted_at IS NULL AND " +
+		membership("kind", vals, "IN", args) + ")"
+}
+
+// membership builds "<col> <op> (?,?,...)" and appends its parameters.
+func membership(col string, vals []string, op string, args *[]any) string {
+	placeholders := make([]string, len(vals))
+	for i, v := range vals {
+		placeholders[i] = "?"
+		*args = append(*args, v)
+	}
+	return col + " " + op + " (" + strings.Join(placeholders, ",") + ")"
+}
+
+// checkChatKinds errors when an explicit chat filter contradicts the kind
+// filter, so callers learn why results would be empty.
+func (d *DB) checkChatKinds(ctx context.Context, chat string, kinds, excludeKinds []string) error {
+	if chat == "" || (len(kinds) == 0 && len(excludeKinds) == 0) {
+		return nil
+	}
+	var kind string
+	err := d.sql.QueryRowContext(ctx,
+		"SELECT kind FROM chats WHERE deleted_at IS NULL AND (id = ? OR name = ?) LIMIT 1",
+		chat, chat).Scan(&kind)
+	if err != nil { // unknown chat: let the query return empty results
+		return nil
+	}
+	allowed := func(k string) bool {
+		if len(kinds) > 0 {
+			return slices.Contains(kinds, k)
+		}
+		return !slices.Contains(excludeKinds, k)
+	}
+	if !allowed(kind) {
+		return fmt.Errorf("chat %q is a %s, which the kind filter excludes; drop the chat or kind argument", chat, kind)
+	}
+	return nil
+}
+
 // checkExcluded reports a friendly error when chatID is excluded.
 func checkExcluded(chatID string, excluded []string) error {
-	for _, id := range excluded {
-		if id == chatID {
-			return fmt.Errorf("chat %s is excluded from sync; call include_chat to restore it", chatID)
-		}
+	if slices.Contains(excluded, chatID) {
+		return fmt.Errorf("chat %s is excluded from sync; call include_chat to restore it", chatID)
 	}
 	return nil
 }

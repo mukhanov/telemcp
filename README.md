@@ -21,14 +21,25 @@ Telegram ◄──MTProto── telemcp watch                telemcp            
 
 - [Telegram Desktop](https://telegram.org) installed and logged in at least
   once — the sync authorizes through its local session (`tdata`)
-- Go 1.24+ to build from source
+- Go 1.27+ to build from source
 
 ## Install
 
+From source (any OS with Telegram Desktop):
+
 ```sh
-git clone <repo> && cd telemcp
+go install github.com/mukhanov/telemcp/cmd/telemcp@latest
+```
+
+or clone and build:
+
+```sh
+git clone https://github.com/mukhanov/telemcp && cd telemcp
 go build -o bin/telemcp ./cmd/telemcp
 ```
+
+The binary is a single executable with no runtime dependencies; the SQLite
+driver is pure Go, so it cross-compiles cleanly.
 
 The archive lives at `~/.telemcp/telemcp.db` by default; every
 subcommand takes `--db` to point elsewhere, and the MCP server resolves the
@@ -106,13 +117,20 @@ Any other MCP client (stdio):
 | Tool | What it does |
 |---|---|
 | `get_status` | Archive freshness: counts, newest message, last import time |
-| `list_chats` | Chats, most recently active first; filter by folder or unread |
-| `get_messages` | Messages with filters: chat, sender, topic, time range, direction |
-| `search_messages` | Full-text search (FTS5) with highlighted snippets |
+| `list_chats` | Chats, most recently active first; filter by folder, unread, or chat kind |
+| `get_messages` | Messages with filters: chat, sender, topic, time range, direction, chat kind |
+| `search_messages` | Full-text search (FTS5) with highlighted snippets; narrow by chat kind |
 | `list_topics` | Forum topics of a chat, pinned first |
 | `get_sync_config` | Show chats excluded from synchronization |
 | `exclude_chat` | Exclude a chat: removed from the archive immediately and hidden from all tools |
 | `include_chat` | Stop excluding a chat; history returns on the next sync |
+
+Kind filters: `list_chats`, `get_messages` and `search_messages` take
+`kinds` (include list) or `exclude_kinds` (omit list) over the chat kinds
+`user` (direct messages), `bot`, `group`, `channel`. Examples: only direct
+messages — `kinds: ["user"]`; everything but bots and channels —
+`exclude_kinds: ["bot", "channel"]`. Supergroups count as groups, bots are a
+kind of their own.
 
 Search notes: plain words match by prefix, so Russian inflections work —
 `договор` finds *договорились*, *договорённости*. FTS5 syntax also works:
@@ -130,8 +148,9 @@ rather not keep on disk. Exclude them from any MCP client:
 > Exclude the chat *Old Project Team* from sync, reason: archived.
 
 `exclude_chat` records the chat in the telemcp config (managed entirely via
-MCP tools, stored under `~/Library/Application Support/telemcp/config.json`,
-override with `TELEMCP_CONFIG`), immediately deletes its messages, topics and
+MCP tools, stored under the OS config dir — `~/Library/Application
+Support/telemcp/config.json` on macOS, `~/.config/telemcp/config.json` on
+Linux; override with `TELEMCP_CONFIG`), immediately deletes its messages, topics and
 archived media from the database, and hides it from every telemcp tool. The
 prune job removes anything the sync re-fetches later; `include_chat` reverses
 the exclusion and the chat's history reappears after the next sync.
@@ -146,6 +165,7 @@ internal/server/      MCP tool wiring
 internal/store/       archive writer: schema, idempotent merges, tombstones
 internal/telegram/    tdata session, live updates, import (telecrawl watch port)
 internal/cli/         watch/import subcommands, media staging
+internal/localfile/   path-containment guards for archived media
 contrib/              launchd templates (watch, prune)
 ```
 

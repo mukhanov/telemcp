@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/store"
 )
 
 func TestAuditMediaReadsRequireSelectedRegularSource(t *testing.T) {

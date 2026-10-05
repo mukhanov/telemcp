@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"telemcp/internal/store"
-	"telemcp/internal/telegram"
+	"github.com/mukhanov/telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/telegram"
 )
 
 type cliError struct {

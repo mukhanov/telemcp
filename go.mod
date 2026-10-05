@@ -1,4 +1,4 @@
-module telemcp
+module github.com/mukhanov/telemcp
 
 go 1.27.1
 

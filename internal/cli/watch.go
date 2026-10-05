@@ -7,8 +7,8 @@ import (
 	"io"
 	"time"
 
-	"telemcp/internal/store"
-	"telemcp/internal/telegram"
+	"github.com/mukhanov/telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/telegram"
 )
 
 // runWatch starts the resident live-sync daemon: incoming updates are merged

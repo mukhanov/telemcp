@@ -3,12 +3,15 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"telemcp/internal/archive"
-	"telemcp/internal/config"
+	"github.com/mukhanov/telemcp/internal/archive"
+	"github.com/mukhanov/telemcp/internal/config"
 )
 
 // configMu serializes read-modify-write cycles on the config file: MCP tool
@@ -39,12 +42,18 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_chats",
-		Description: "List Telegram chats in the local archive, most recently active first. Use the returned chat id in get_messages, search_messages and list_topics. Chats excluded from sync (see get_sync_config) are not listed.",
+		Description: "List Telegram chats in the local archive, most recently active first. Use the returned chat id in get_messages, search_messages and list_topics. Filter by kind (user=direct messages, bot, group, channel) with kinds/exclude_kinds. Chats excluded from sync (see get_sync_config) are not listed.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args listChatsArgs) (*mcp.CallToolResult, *ChatsResult, error) {
+		kinds, excludeKinds, err := resolveKinds(args.Kinds, args.ExcludeKinds)
+		if err != nil {
+			return nil, nil, err
+		}
 		chats, err := db.Chats(ctx, archive.ChatFilter{
-			Limit:      args.Limit,
-			Folder:     args.Folder,
-			UnreadOnly: args.UnreadOnly,
+			Limit:        args.Limit,
+			Folder:       args.Folder,
+			UnreadOnly:   args.UnreadOnly,
+			Kinds:        kinds,
+			ExcludeKinds: excludeKinds,
 		}, exclusions()...)
 		if err != nil {
 			return nil, nil, err
@@ -54,17 +63,23 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_messages",
-		Description: "Read messages from the local archive with filters: chat, sender, forum topic, time range, direction. Newest first unless asc=true. Combine after/before with a chat id for a timeline.",
+		Description: "Read messages from the local archive with filters: chat, sender, forum topic, time range, direction, chat kind (user=direct messages, bot, group, channel). Newest first unless asc=true. Combine after/before with a chat id for a timeline.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args getMessagesArgs) (*mcp.CallToolResult, *MessagesResult, error) {
+		kinds, excludeKinds, err := resolveKinds(args.Kinds, args.ExcludeKinds)
+		if err != nil {
+			return nil, nil, err
+		}
 		messages, err := db.Messages(ctx, archive.MessageFilter{
-			Chat:   args.Chat,
-			Sender: args.Sender,
-			Topic:  args.Topic,
-			After:  args.After,
-			Before: args.Before,
-			FromMe: args.FromMe,
-			Limit:  args.Limit,
-			Asc:    args.Asc,
+			Chat:         args.Chat,
+			Sender:       args.Sender,
+			Topic:        args.Topic,
+			After:        args.After,
+			Before:       args.Before,
+			FromMe:       args.FromMe,
+			Kinds:        kinds,
+			ExcludeKinds: excludeKinds,
+			Limit:        args.Limit,
+			Asc:          args.Asc,
 		}, exclusions()...)
 		if err != nil {
 			return nil, nil, err
@@ -74,9 +89,19 @@ func Register(server *mcp.Server, db *archive.DB, configPath string) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_messages",
-		Description: "Full-text search over archived Telegram messages (FTS5). Plain words match by prefix (договор matches договорённости). Also supports \"quoted phrases\", prefix*, sender:NAME, chat:NAME, OR. Returns highlighted snippets, newest first.",
+		Description: "Full-text search over archived Telegram messages (FTS5). Plain words match by prefix (договор matches договорённости). Also supports \"quoted phrases\", prefix*, sender:NAME, chat:NAME, OR. Returns highlighted snippets, newest first. Narrow by chat kind with kinds/exclude_kinds (user=direct messages, bot, group, channel).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args searchMessagesArgs) (*mcp.CallToolResult, *SearchResult, error) {
-		hits, err := db.Search(ctx, args.Query, args.Chat, args.Limit, exclusions()...)
+		kinds, excludeKinds, err := resolveKinds(args.Kinds, args.ExcludeKinds)
+		if err != nil {
+			return nil, nil, err
+		}
+		hits, err := db.Search(ctx, archive.SearchFilter{
+			Query:        args.Query,
+			Chat:         args.Chat,
+			Kinds:        kinds,
+			ExcludeKinds: excludeKinds,
+			Limit:        args.Limit,
+		}, exclusions()...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -202,26 +227,32 @@ type IncludeResult struct {
 }
 
 type listChatsArgs struct {
-	Limit      int    `json:"limit,omitempty" jsonschema:"max chats to return; default 50, max 500"`
-	Folder     string `json:"folder,omitempty" jsonschema:"filter by folder id or title"`
-	UnreadOnly bool   `json:"unread_only,omitempty" jsonschema:"only chats with unread messages"`
+	Limit        int      `json:"limit,omitempty" jsonschema:"max chats to return; default 50, max 500"`
+	Folder       string   `json:"folder,omitempty" jsonschema:"filter by folder id or title"`
+	UnreadOnly   bool     `json:"unread_only,omitempty" jsonschema:"only chats with unread messages"`
+	Kinds        []string `json:"kinds,omitempty" jsonschema:"only chats of these kinds: user (direct messages), bot, group, channel"`
+	ExcludeKinds []string `json:"exclude_kinds,omitempty" jsonschema:"omit chats of these kinds: user (direct messages), bot, group, channel"`
 }
 
 type getMessagesArgs struct {
-	Chat   string `json:"chat,omitempty" jsonschema:"chat id (from list_chats) or exact chat name"`
-	Sender string `json:"sender,omitempty" jsonschema:"sender id or exact sender name"`
-	Topic  string `json:"topic,omitempty" jsonschema:"forum topic id (from list_topics)"`
-	After  string `json:"after,omitempty" jsonschema:"only messages at or after this time; RFC3339 or YYYY-MM-DD"`
-	Before string `json:"before,omitempty" jsonschema:"only messages at or before this time; RFC3339 or YYYY-MM-DD"`
-	FromMe *bool  `json:"from_me,omitempty" jsonschema:"only messages sent by me (true) or by others (false)"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"max messages to return; default 50, max 500"`
-	Asc    bool   `json:"asc,omitempty" jsonschema:"oldest first instead of newest first"`
+	Chat         string   `json:"chat,omitempty" jsonschema:"chat id (from list_chats) or exact chat name"`
+	Sender       string   `json:"sender,omitempty" jsonschema:"sender id or exact sender name"`
+	Topic        string   `json:"topic,omitempty" jsonschema:"forum topic id (from list_topics)"`
+	After        string   `json:"after,omitempty" jsonschema:"only messages at or after this time; RFC3339 or YYYY-MM-DD"`
+	Before       string   `json:"before,omitempty" jsonschema:"only messages at or before this time; RFC3339 or YYYY-MM-DD"`
+	FromMe       *bool    `json:"from_me,omitempty" jsonschema:"only messages sent by me (true) or by others (false)"`
+	Kinds        []string `json:"kinds,omitempty" jsonschema:"only messages from chats of these kinds: user (direct messages), bot, group, channel"`
+	ExcludeKinds []string `json:"exclude_kinds,omitempty" jsonschema:"omit messages from chats of these kinds: user (direct messages), bot, group, channel"`
+	Limit        int      `json:"limit,omitempty" jsonschema:"max messages to return; default 50, max 500"`
+	Asc          bool     `json:"asc,omitempty" jsonschema:"oldest first instead of newest first"`
 }
 
 type searchMessagesArgs struct {
-	Query string `json:"query" jsonschema:"FTS5 query: plain words match by prefix; supports \"quoted phrases\", prefix*, sender:NAME, chat:NAME, OR"`
-	Chat  string `json:"chat,omitempty" jsonschema:"restrict search to this chat id or exact chat name"`
-	Limit int    `json:"limit,omitempty" jsonschema:"max hits to return; default 20, max 100"`
+	Query        string   `json:"query" jsonschema:"FTS5 query: plain words match by prefix; supports \"quoted phrases\", prefix*, sender:NAME, chat:NAME, OR"`
+	Chat         string   `json:"chat,omitempty" jsonschema:"restrict search to this chat id or exact chat name"`
+	Kinds        []string `json:"kinds,omitempty" jsonschema:"only hits from chats of these kinds: user (direct messages), bot, group, channel"`
+	ExcludeKinds []string `json:"exclude_kinds,omitempty" jsonschema:"omit hits from chats of these kinds: user (direct messages), bot, group, channel"`
+	Limit        int      `json:"limit,omitempty" jsonschema:"max hits to return; default 20, max 100"`
 }
 
 type listTopicsArgs struct {
@@ -236,4 +267,35 @@ type excludeChatArgs struct {
 
 type includeChatArgs struct {
 	Chat string `json:"chat" jsonschema:"excluded chat id or its name, as shown by get_sync_config"`
+}
+
+// chatKinds is the closed set of chat kinds stored by the sync.
+var chatKinds = map[string]bool{
+	"user": true, "bot": true, "group": true, "channel": true, "unknown": true,
+}
+
+// resolveKinds normalizes and validates a kinds/exclude_kinds pair. At most
+// one of the two may be set; kinds are lowercased on the way through.
+func resolveKinds(kinds, excludeKinds []string) (normalized, exclude []string, err error) {
+	if len(kinds) > 0 && len(excludeKinds) > 0 {
+		return nil, nil, errors.New("pass either kinds or exclude_kinds, not both")
+	}
+	normalize := func(vals []string, what string) ([]string, error) {
+		out := make([]string, 0, len(vals))
+		for _, v := range vals {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if !chatKinds[v] {
+				return nil, fmt.Errorf("unknown chat kind %q in %s; valid kinds: user, bot, group, channel, unknown", v, what)
+			}
+			out = append(out, v)
+		}
+		return out, nil
+	}
+	if normalized, err = normalize(kinds, "kinds"); err != nil {
+		return nil, nil, err
+	}
+	if exclude, err = normalize(excludeKinds, "exclude_kinds"); err != nil {
+		return nil, nil, err
+	}
+	return normalized, exclude, nil
 }

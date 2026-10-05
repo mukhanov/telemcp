@@ -21,10 +21,10 @@ import (
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/mukhanov/telemcp/internal/localfile"
+	"github.com/mukhanov/telemcp/internal/store"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
-	"telemcp/internal/localfile"
-	"telemcp/internal/store"
 )
 
 // WatchOptions configures the resident live-sync daemon.

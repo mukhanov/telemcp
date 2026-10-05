@@ -48,6 +48,10 @@ func newTestDB(t *testing.T) *DB {
 		"-100123456", "group", "Work Chat", "workchat", base+300, 3, 6, 1)
 	exec(`INSERT INTO chats (id, kind, name, username, last_message_at, unread_count, message_count, forum) VALUES (?,?,?,?,?,?,?,?)`,
 		"777000111", "user", "Иван Петров", "ivanp", base+100, 0, 1, 0)
+	exec(`INSERT INTO chats (id, kind, name, username, last_message_at, unread_count, message_count, forum) VALUES (?,?,?,?,?,?,?,?)`,
+		"700000002", "bot", "Reminder Bot", "reminder_bot", base+120, 0, 1, 0)
+	exec(`INSERT INTO chats (id, kind, name, username, last_message_at, unread_count, message_count, forum) VALUES (?,?,?,?,?,?,?,?)`,
+		"-100777888", "channel", "News Channel", "newschannel", base+200, 0, 1, 0)
 	exec(`INSERT INTO chats (id, kind, name, last_message_at, deleted_at) VALUES (?,?,?,?,?)`,
 		"-100999", "group", "Deleted Chat", base+50, base)
 	exec(`INSERT INTO folders (id, title) VALUES ('folder-1', 'Work')`)
@@ -73,6 +77,8 @@ func newTestDB(t *testing.T) *DB {
 		{3, "-100123456", "Work Chat", "103", "Николай", base + 300, 1, "Ок, фиксирую договорённости", "1", nil},
 		{4, "-100123456", "Work Chat", "104", "Анна", base + 400, 0, "секретноепредложение", "", base + 500},
 		{5, "777000111", "Иван Петров", "201", "Иван Петров", base + 150, 0, "Привет, как саммари?", "", nil},
+		{6, "700000002", "Reminder Bot", "301", "Reminder Bot", base + 120, 0, "Напоминание: договор к пятнице", "", nil},
+		{7, "-100777888", "News Channel", "401", "News Channel", base + 200, 0, "Новости: бюджет утверждён вчера", "", nil},
 	}
 	for _, m := range msgs {
 		exec(`INSERT INTO messages (rowid, event_id, chat_jid, chat_name, msg_id, sender_name, ts, from_me, text, topic_id, deleted_at)
@@ -114,8 +120,8 @@ func TestChats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chats) != 2 { // deleted chat excluded
-		t.Fatalf("chats = %d, want 2: %+v", len(chats), chats)
+	if len(chats) != 4 { // deleted chat excluded
+		t.Fatalf("chats = %d, want 4: %+v", len(chats), chats)
 	}
 	if chats[0].Name != "Work Chat" || !chats[0].Forum {
 		t.Fatalf("first chat = %+v, want Work Chat forum", chats[0])
@@ -160,12 +166,12 @@ func TestMessagesFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != 3 { // 201, 102, 103 (inclusive lower bound)
-		t.Fatalf("after filter = %d, want 3", len(after))
+	if len(after) != 4 { // 201, 102, 401, 103 (inclusive lower bound)
+		t.Fatalf("after filter = %d, want 4", len(after))
 	}
 	before, _ := db.Messages(ctx, MessageFilter{Before: base.Add(200 * time.Second).Format(time.RFC3339)})
-	if len(before) != 3 { // 101, 201, 102 (inclusive upper bound)
-		t.Fatalf("before filter = %d, want 3", len(before))
+	if len(before) != 5 { // 101, 301, 201, 102, 401 (inclusive upper bound)
+		t.Fatalf("before filter = %d, want 5", len(before))
 	}
 	range1, err := db.Messages(ctx, MessageFilter{
 		After:  base.Add(150 * time.Second).Format(time.RFC3339),
@@ -174,8 +180,8 @@ func TestMessagesFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(range1) != 2 { // 201, 102
-		t.Fatalf("range filter = %d, want 2", len(range1))
+	if len(range1) != 3 { // 201, 102, 401
+		t.Fatalf("range filter = %d, want 3", len(range1))
 	}
 	dateOnly, err := db.Messages(ctx, MessageFilter{Chat: "-100123456", After: "2026-01-02"})
 	if err != nil {
@@ -215,39 +221,44 @@ func TestSearch(t *testing.T) {
 	ctx := context.Background()
 
 	// Plain Russian word must match its inflected form via the prefix rewrite.
-	hits, err := db.Search(ctx, "договор", "", 0)
+	hits, err := db.Search(ctx, SearchFilter{Query: "договор"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hits) != 2 { // договорённости (101) and фиксирую договорённости (103)
-		t.Fatalf("prefix search hits = %d, want 2: %+v", len(hits), hits)
+	if len(hits) != 3 { // договорённости (101), договор (301), фиксирую договорённости (103)
+		t.Fatalf("prefix search hits = %d, want 3: %+v", len(hits), hits)
 	}
 	if !strings.Contains(hits[0].Snippet, "⟦") {
 		t.Fatalf("snippet without highlight: %q", hits[0].Snippet)
 	}
 
-	phrase, err := db.Search(ctx, `"бюджет утверждён"`, "", 0)
+	phrase, err := db.Search(ctx, SearchFilter{Query: `"бюджет утверждён"`})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(phrase) != 1 || phrase[0].ChatName != "Work Chat" {
+	if len(phrase) != 2 { // Work Chat and News Channel both carry the phrase
 		t.Fatalf("phrase hits = %+v", phrase)
 	}
+	for _, h := range phrase {
+		if h.ChatName != "Work Chat" && h.ChatName != "News Channel" {
+			t.Fatalf("unexpected phrase hit: %+v", h)
+		}
+	}
 
-	inChat, _ := db.Search(ctx, "релиз", "Work Chat", 0)
+	inChat, _ := db.Search(ctx, SearchFilter{Query: "релиз", Chat: "Work Chat"})
 	if len(inChat) != 1 {
 		t.Fatalf("chat-scoped hits = %+v", inChat)
 	}
 
-	deleted, _ := db.Search(ctx, "секретноепредложение", "", 0)
+	deleted, _ := db.Search(ctx, SearchFilter{Query: "секретноепредложение"})
 	if len(deleted) != 0 {
 		t.Fatalf("tombstoned message leaked into search: %+v", deleted)
 	}
 
-	if _, err := db.Search(ctx, `("unclosed`, "", 0); err == nil || !strings.Contains(err.Error(), "FTS") {
+	if _, err := db.Search(ctx, SearchFilter{Query: `("unclosed`}); err == nil || !strings.Contains(err.Error(), "FTS") {
 		t.Fatalf("syntax error = %v, want FTS guidance", err)
 	}
-	if _, err := db.Search(ctx, "   ", "", 0); err == nil {
+	if _, err := db.Search(ctx, SearchFilter{Query: "   "}); err == nil {
 		t.Fatal("empty query must error")
 	}
 }
@@ -280,7 +291,7 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Chats != 2 || st.Messages != 4 || st.Topics != 2 {
+	if st.Chats != 4 || st.Messages != 6 || st.Topics != 2 {
 		t.Fatalf("counts = %+v", st)
 	}
 	if st.LastImportAt == "" || st.NewestMessage == "" {
@@ -288,6 +299,62 @@ func TestStatus(t *testing.T) {
 	}
 	if want := fixtureBase.Add(300 * time.Second).UTC().Format(time.RFC3339); st.NewestMessage != want {
 		t.Fatalf("newest = %s, want %s", st.NewestMessage, want)
+	}
+}
+
+func TestKindFilters(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	// list_chats: include list picks exactly the named kinds.
+	groups, err := db.Chats(ctx, ChatFilter{Kinds: []string{"group"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Name != "Work Chat" {
+		t.Fatalf("group chats = %+v", groups)
+	}
+	human, _ := db.Chats(ctx, ChatFilter{Kinds: []string{"user", "channel"}})
+	if len(human) != 2 || human[0].Kind != "channel" || human[1].Kind != "user" {
+		t.Fatalf("user+channel chats = %+v", human)
+	}
+
+	// list_chats: omit list drops the named kinds, keeps the rest.
+	noBots, _ := db.Chats(ctx, ChatFilter{ExcludeKinds: []string{"bot"}})
+	if len(noBots) != 3 {
+		t.Fatalf("chats without bots = %+v", noBots)
+	}
+
+	// get_messages filters by the kind of the chat the message belongs to.
+	dmOnly, err := db.Messages(ctx, MessageFilter{Kinds: []string{"user"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dmOnly) != 1 || dmOnly[0].Chat != "777000111" {
+		t.Fatalf("dm messages = %+v", dmOnly)
+	}
+	noGroups, _ := db.Messages(ctx, MessageFilter{ExcludeKinds: []string{"group"}})
+	if len(noGroups) != 3 {
+		t.Fatalf("non-group messages = %+v", noGroups)
+	}
+
+	// Explicit chat contradicts the kind filter: error, not empty results.
+	if _, err := db.Messages(ctx, MessageFilter{Chat: "Work Chat", Kinds: []string{"user"}}); err == nil ||
+		!strings.Contains(err.Error(), "kind filter excludes") {
+		t.Fatalf("chat vs kinds contradiction = %v, want kind-filter error", err)
+	}
+
+	// search_messages narrows hits by chat kind the same way.
+	hits, err := db.Search(ctx, SearchFilter{Query: "договор", ExcludeKinds: []string{"bot"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 { // bot's "договор к пятнице" dropped, both Work Chat hits stay
+		t.Fatalf("kind-filtered hits = %+v", hits)
+	}
+	botHits, _ := db.Search(ctx, SearchFilter{Query: "договор", Kinds: []string{"bot"}})
+	if len(botHits) != 1 || botHits[0].ChatName != "Reminder Bot" {
+		t.Fatalf("bot hits = %+v", botHits)
 	}
 }
 
@@ -317,22 +384,29 @@ func TestQueryExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chats) != 1 || chats[0].ID != "777000111" {
+	if len(chats) != 3 { // Work Chat excluded; News Channel, bot and Иван remain
 		t.Fatalf("chats with exclusion = %+v", chats)
 	}
 	messages, err := db.Messages(ctx, MessageFilter{}, excl...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || messages[0].Chat != "777000111" {
+	if len(messages) != 3 { // DM, bot and channel messages survive; Work Chat dropped
 		t.Fatalf("messages with exclusion = %+v", messages)
 	}
-	hits, err := db.Search(ctx, "договор", "", 0, excl...)
+	for _, m := range messages {
+		if m.Chat == "-100123456" {
+			t.Fatalf("excluded chat leaked into messages: %+v", m)
+		}
+	}
+	hits, err := db.Search(ctx, SearchFilter{Query: "договор"}, excl...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hits) != 0 {
-		t.Fatalf("search leaked excluded chat: %+v", hits)
+	for _, h := range hits { // the bot's "договор к пятнице" may hit, Work Chat may not
+		if h.Chat == "-100123456" {
+			t.Fatalf("search leaked excluded chat: %+v", h)
+		}
 	}
 	if _, err := db.Topics(ctx, "Work Chat", 0, excl...); err == nil || !strings.Contains(err.Error(), "excluded") {
 		t.Fatalf("topics on excluded chat: %v", err)
@@ -388,7 +462,7 @@ func TestPrune(t *testing.T) {
 	if err := db.sql.QueryRow("SELECT count(*) FROM messages WHERE chat_jid = '-100123456'").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("messages after prune = %d (%v)", n, err)
 	}
-	if err := db.sql.QueryRow("SELECT count(*) FROM messages_fts").Scan(&n); err != nil || n != 1 { // only Иван's row
+	if err := db.sql.QueryRow("SELECT count(*) FROM messages_fts").Scan(&n); err != nil || n != 3 { // Иван, bot and channel rows
 		t.Fatalf("fts after prune = %d (%v)", n, err)
 	}
 	if err := db.sql.QueryRow("SELECT count(*) FROM folder_chats").Scan(&n); err != nil || n != 0 {

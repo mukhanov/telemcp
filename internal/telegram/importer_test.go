@@ -9,7 +9,7 @@ import (
 
 	querymessages "github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
-	"telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/store"
 )
 
 func TestSourceIdentityIsOrderIndependent(t *testing.T) {

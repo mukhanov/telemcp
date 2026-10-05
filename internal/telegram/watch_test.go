@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-	"telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/store"
 )
 
 // tgTestUser builds a user with the flag-aware setters, so optional-field

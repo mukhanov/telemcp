@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"telemcp/internal/store"
-	"telemcp/internal/telegram"
+	"github.com/mukhanov/telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/telegram"
 )
 
 func TestMediaRefCacheDoesNotRescanAfterFileRemoved(t *testing.T) {

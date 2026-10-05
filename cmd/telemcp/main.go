@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -18,17 +19,28 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"telemcp/internal/archive"
-	"telemcp/internal/cli"
-	"telemcp/internal/config"
-	"telemcp/internal/server"
+	"github.com/mukhanov/telemcp/internal/archive"
+	"github.com/mukhanov/telemcp/internal/cli"
+	"github.com/mukhanov/telemcp/internal/config"
+	"github.com/mukhanov/telemcp/internal/server"
 )
 
-const version = "0.2.1"
+const version = "0.3.0"
 
 func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr) // stdout carries the MCP stdio transport
+
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-v", "version":
+			fmt.Println("telemcp " + version)
+			return
+		case "--help", "-h", "help":
+			usage(os.Stderr)
+			return
+		}
+	}
 
 	if subcommand := detectSubcommand(os.Args[1:]); subcommand != "" {
 		switch subcommand {
@@ -73,6 +85,24 @@ func main() {
 	if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("telemcp: %v", err)
 	}
+}
+
+// usage prints the mode overview; the subcommands document their own flags.
+func usage(w io.Writer) {
+	fmt.Fprintf(w, `telemcp %s — local Telegram archive: live sync, import, prune,
+and a read-only MCP server exposing the archive to AI clients.
+
+Usage:
+  telemcp [DBPATH]          run the MCP server over stdio (default mode)
+  telemcp watch             resident live-sync daemon
+  telemcp import            one-shot tdata import
+  telemcp prune             delete chats excluded via MCP
+  telemcp --version         print version
+  telemcp --help            this help
+
+The MCP server resolves the database from DBPATH, $TELEMCP_DB, or
+~/.telemcp/telemcp.db. Run 'telemcp watch --help' for sync flags.
+`, version)
 }
 
 // detectSubcommand finds the sync subcommand in args, tolerating global

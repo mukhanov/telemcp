@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"telemcp/internal/localfile"
-	"telemcp/internal/store"
+	"github.com/mukhanov/telemcp/internal/localfile"
+	"github.com/mukhanov/telemcp/internal/store"
 )
 
 type ImportOptions struct {

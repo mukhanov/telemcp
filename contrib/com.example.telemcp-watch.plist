@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Template: resident live-sync daemon. Keeps ~/.telecrawl/telecrawl.db
+<!-- Template: resident live-sync daemon. Keeps ~/.telemcp/telemcp.db
      fresh by holding one tdata-authorized MTProto connection: new messages
      land in the archive within seconds, periodic reconcile passes cover
      edits, counters and media. Replace __TELEMCP_BIN__ (telemcp binary) and

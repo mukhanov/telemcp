@@ -23,8 +23,8 @@ import (
 	"github.com/gotd/td/telegram/query/dialogs"
 	querymessages "github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
+	"github.com/mukhanov/telemcp/internal/store"
 	"golang.org/x/crypto/blake2b"
-	"telemcp/internal/store"
 )
 
 const (
@@ -823,7 +823,11 @@ func tdataPeerInfo(peerID tg.PeerClass, ents peer.Entities, selfID int64) tdataP
 	case *tg.PeerChannel:
 		if channel, ok := ents.Channel(p.ChannelID); ok {
 			username, _ := channel.GetUsername()
-			return tdataPeerDetails{kind: "channel", name: channel.Title, username: username, forum: channel.GetForum()}
+			kind := "channel"
+			if channel.GetMegagroup() { // supergroups are chats, not broadcast channels
+				kind = "group"
+			}
+			return tdataPeerDetails{kind: kind, name: channel.Title, username: username, forum: channel.GetForum()}
 		}
 		return tdataPeerDetails{kind: "channel", name: strconv.FormatInt(p.ChannelID, 10)}
 	default:
@@ -842,7 +846,11 @@ func tdataUserInfo(user *tg.User) tdataPeerDetails {
 	if name == "" && user.ID != 0 {
 		name = strconv.FormatInt(user.ID, 10)
 	}
-	return tdataPeerDetails{kind: "user", name: name, username: username}
+	kind := "user"
+	if user.GetBot() { // bots get their own kind so chat filters can drop them
+		kind = "bot"
+	}
+	return tdataPeerDetails{kind: kind, name: name, username: username}
 }
 
 func tdataPeerIDString(peerID tg.PeerClass, selfID int64) string {
