@@ -11,8 +11,6 @@ import (
 	"sync"
 	"unicode"
 
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/session/tdesktop"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/query"
@@ -391,39 +389,32 @@ func downloadToFile(ctx context.Context, raw *tg.Client, file querymessages.File
 	return info.Size(), ""
 }
 
-// DownloadViaTData downloads message media over an ephemeral tdata-authorized
-// Telegram connection. The caller must hold the archive connection lock. An
-// empty sourcePath resolves to the default Telegram Desktop tdata directory.
-func DownloadViaTData(ctx context.Context, sourcePath string, chatID string, msgIDs []int, opts DownloadOptions) ([]MediaDownload, error) {
-	source := resolveImportSource(sourcePath)
-	accounts, err := tdesktop.Read(source.path, nil)
+// DownloadMediaAuthorized downloads message media over an ephemeral Telegram
+// connection authorized like the sync commands: the telemcp session file when
+// one resolves, the Telegram Desktop tdata otherwise. The caller must hold
+// the archive connection lock. An empty sourcePath prefers the default
+// session file over the default tdata directory; an explicit path is a
+// session file when it names an existing regular file, a tdata directory
+// otherwise.
+func DownloadMediaAuthorized(ctx context.Context, sourcePath string, chatID string, msgIDs []int, opts DownloadOptions) ([]MediaDownload, error) {
+	source, err := resolveDownloadSource(sourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("read Telegram Desktop tdata: %w", err)
+		return nil, err
 	}
-	if len(accounts) == 0 {
-		return nil, errors.New("no Telegram Desktop accounts found")
-	}
-	data, err := session.TDesktopSession(accounts[0])
+	creds, err := ResolveAppCredentials()
 	if err != nil {
-		return nil, fmt.Errorf("read Telegram Desktop session: %w", err)
+		return nil, err
 	}
-	storage := &session.StorageMemory{}
-	if err := (&session.Loader{Storage: storage}).Save(ctx, data); err != nil {
-		return nil, fmt.Errorf("store Telegram Desktop session: %w", err)
+	storage, err := source.SessionStorage(ctx)
+	if err != nil {
+		return nil, err
 	}
-	client := telegram.NewClient(telegramDesktopAPIID, telegramDesktopAPIHash, telegram.Options{
+	client := telegram.NewClient(int(creds.ID), creds.Hash, telegram.Options{
 		SessionStorage: storage,
 		NoUpdates:      true,
 		AllowCDN:       true,
 		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(nil)},
-		Device: telegram.DeviceConfig{
-			DeviceModel:    "Desktop",
-			SystemVersion:  "Windows 11",
-			AppVersion:     "6.5 x64",
-			SystemLangCode: "en-US",
-			LangPack:       "tdesktop",
-			LangCode:       "en",
-		},
+		Device:         telegramDeviceConfig(),
 	})
 	var results []MediaDownload
 	err = client.Run(ctx, func(ctx context.Context) error {

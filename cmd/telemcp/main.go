@@ -25,7 +25,7 @@ import (
 	"github.com/mukhanov/telemcp/internal/server"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
 	log.SetFlags(0)
@@ -47,6 +47,14 @@ func main() {
 		case "prune":
 			if err := runPrune(context.Background()); err != nil {
 				log.Fatalf("telemcp prune: %v", err)
+			}
+			return
+		case "login":
+			// Interactive: login prompts and reads stdin, so it runs on a
+			// plain context without signal wrapping and never opens the db.
+			if err := cli.Run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
+				fmt.Fprintln(os.Stderr, "telemcp:", err)
+				os.Exit(cli.ExitCode(err))
 			}
 			return
 		case "watch", "import", "sync":
@@ -96,6 +104,7 @@ Usage:
   telemcp [DBPATH]          run the MCP server over stdio (default mode)
   telemcp watch             resident live-sync daemon
   telemcp import            one-shot tdata import
+  telemcp login             authorize a dedicated session (~/.telemcp/session.json)
   telemcp prune             delete chats excluded via MCP
   telemcp --version         print version
   telemcp --help            this help
@@ -105,12 +114,12 @@ The MCP server resolves the database from DBPATH, $TELEMCP_DB, or
 `, version)
 }
 
-// detectSubcommand finds the sync subcommand in args, tolerating global
+// detectSubcommand finds the subcommand in args, tolerating global
 // flags before it (telemcp --db X import); it returns "" for MCP mode.
 func detectSubcommand(args []string) string {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "prune", "watch", "import", "sync":
+		case "prune", "watch", "import", "sync", "login":
 			return args[i]
 		case "--db", "--source": // value-carrying globals: skip their values
 			i++

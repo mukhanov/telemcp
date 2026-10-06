@@ -20,7 +20,8 @@ Telegram ◄──MTProto── telemcp watch                telemcp            
 ## Requirements
 
 - [Telegram Desktop](https://telegram.org) installed and logged in at least
-  once — the sync authorizes through its local session (`tdata`)
+  once — the sync authorizes through its local session (`tdata`), or through
+  a dedicated `telemcp login` session (see below)
 - Go 1.27+ to build from source
 
 ## Install
@@ -52,10 +53,35 @@ subcommand takes `--db` to point elsewhere, and the MCP server resolves the
 path from its first CLI argument, the `TELEMCP_DB` environment variable, or
 the same default.
 
+## A dedicated session (recommended)
+
+By default the sync authorizes through Telegram Desktop's local session
+(tdata): telemcp and Desktop then share one authorization, and Telegram
+meters rate limits and the update stream per authorization — on busy
+archives Desktop can feel sluggish while `telemcp watch` runs. Give telemcp
+its own login:
+
+```sh
+bin/telemcp login
+```
+
+Enter your phone number, the confirmation code and — if enabled — your
+two-factor password; the session is stored at `~/.telemcp/session.json`
+(`--session` places it elsewhere). Telegram then treats the daemon as its
+own device: independent rate limits, independent update stream, visible and
+revocable in Desktop under Settings → Devices. `watch`, `import` and media
+downloads prefer this session automatically and fall back to tdata when the
+file is absent — remove or rename the file to switch back.
+
+The daemon presents itself with Telegram Desktop's public app credentials by
+default. Registering your own pair at [my.telegram.org](https://my.telegram.org)
+and exporting `TELEMCP_API_ID` / `TELEMCP_API_HASH` (both, or neither) is the
+gentlest option for the account.
+
 ## Keeping the archive fresh
 
 - **`telemcp watch`** (recommended): a resident daemon holding one
-  tdata-authorized MTProto connection — new messages land in the archive
+  authorized MTProto connection — new messages land in the archive
   within seconds, and periodic full reconcile passes on the same connection
   cover what the live path defers (edits, counters, media, chat metadata).
 
@@ -87,7 +113,9 @@ the same default.
   ```
 
 Useful flags (both subcommands): `--path` to point at a non-default tdata
-directory, `--dialogs-limit`/`--messages-limit` to bound the initial fetch,
+directory, `--session` for a non-default session file (a dedicated
+`telemcp login` session is preferred automatically when it exists),
+`--dialogs-limit`/`--messages-limit` to bound the initial fetch,
 `--fetch-media` with `--fetch-media-max-age`/`--fetch-media-max-mb` to
 archive photos, videos and documents alongside the messages. `--json`
 switches the output to machine-readable stats.
@@ -185,7 +213,8 @@ internal/archive/     read-only archive access for MCP: queries, FTS search, pru
 internal/config/      exclusion config (managed via MCP tools)
 internal/server/      MCP tool wiring
 internal/store/       archive writer: schema, idempotent merges, tombstones
-internal/telegram/    tdata session, live updates, import (telecrawl watch port)
+internal/telegram/    sessions (tdata + dedicated login), live updates,
+                      media downloads, import (telecrawl watch port)
 internal/cli/         watch/import subcommands, media staging
 internal/localfile/   path-containment guards for archived media
 contrib/              launchd templates (watch, prune)

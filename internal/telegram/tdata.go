@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/session/tdesktop"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/telegram/query"
@@ -73,36 +71,22 @@ type tdataDialog struct {
 	forum    bool
 }
 
-func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, dbPath, mediaTempDir string) (ImportResult, error) {
+func importTDataGo(ctx context.Context, source AuthSource, opts ImportOptions, dbPath, mediaTempDir string) (ImportResult, error) {
 	started := time.Now().UTC()
-	accounts, err := tdesktop.Read(sourcePath, nil)
+	creds, err := ResolveAppCredentials()
 	if err != nil {
-		return ImportResult{}, fmt.Errorf("read Telegram Desktop tdata: %w", err)
+		return ImportResult{}, err
 	}
-	if len(accounts) == 0 {
-		return ImportResult{}, errors.New("no Telegram Desktop accounts found")
-	}
-	data, err := session.TDesktopSession(accounts[0])
+	storage, err := source.SessionStorage(ctx)
 	if err != nil {
-		return ImportResult{}, fmt.Errorf("read Telegram Desktop session: %w", err)
+		return ImportResult{}, err
 	}
-	storage := &session.StorageMemory{}
-	if err := (&session.Loader{Storage: storage}).Save(ctx, data); err != nil {
-		return ImportResult{}, fmt.Errorf("store Telegram Desktop session: %w", err)
-	}
-	client := telegram.NewClient(telegramDesktopAPIID, telegramDesktopAPIHash, telegram.Options{
+	client := telegram.NewClient(int(creds.ID), creds.Hash, telegram.Options{
 		SessionStorage: storage,
 		NoUpdates:      true,
 		AllowCDN:       true,
 		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(opts.Progress)},
-		Device: telegram.DeviceConfig{
-			DeviceModel:    "Desktop",
-			SystemVersion:  "Windows 11",
-			AppVersion:     "6.5 x64",
-			SystemLangCode: "en-US",
-			LangPack:       "tdesktop",
-			LangCode:       "en",
-		},
+		Device:         telegramDeviceConfig(),
 	})
 
 	var result ImportResult
@@ -117,9 +101,9 @@ func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, d
 			raw:          tg.NewClient(client),
 			selfID:       self.ID,
 			opts:         opts,
-			sourcePath:   sourcePath,
+			sourcePath:   source.Path,
 			mediaTempDir: mediaTempDir,
-			existingRefs: tdataExistingMediaRefs(opts, sourcePath),
+			existingRefs: tdataExistingMediaRefs(opts, source.Path),
 		}
 		result, err = importer.importAccount(ctx)
 		return err
@@ -127,8 +111,9 @@ func importTDataGo(ctx context.Context, sourcePath string, opts ImportOptions, d
 	if err != nil {
 		return ImportResult{}, err
 	}
-	result.Stats.SourcePath = sourcePath
-	result.Stats.SourceIdentity = sourceIdentity("tdata", strconv.FormatInt(selfID, 10))
+	result.Stats.SourcePath = source.Identity()
+	result.Stats.SourceUserID = selfID
+	result.Stats.SourceIdentity = sourceIdentity(source.Kind, strconv.FormatInt(selfID, 10))
 	result.Stats.DBPath = dbPath
 	result.Stats.StartedAt = started
 	result.Stats.FinishedAt = time.Now().UTC()

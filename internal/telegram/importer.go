@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -18,7 +16,13 @@ import (
 )
 
 type ImportOptions struct {
-	Path          string
+	Path string
+	// SessionPath authorizes via a dedicated telemcp session file instead of
+	// the Telegram Desktop tdata: an explicit path must be an existing
+	// session file; empty prefers the default session file
+	// (~/.telemcp/session.json) when present and falls back to Path (the
+	// tdata directory). WatchOptions inherits the field.
+	SessionPath   string
 	DialogsLimit  int
 	MessagesLimit int
 	ChatID        string
@@ -58,15 +62,18 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 	if WatchLockHeld(dbPath) {
 		return ImportResult{}, errors.New("telemcp watch is running for this archive; stop it before a manual import")
 	}
-	source := resolveImportSource(strings.TrimSpace(opts.Path))
-	canonicalPath, err := canonicalImportSourcePath(source.path)
+	source, err := ResolveAuthSource(opts.SessionPath)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("resolve Telegram auth source: %w", err)
+	}
+	canonicalPath, err := canonicalImportSourcePath(source.Path)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("resolve Telegram source target: %w", err)
 	}
-	source.path = canonicalPath
+	source.Path = canonicalPath
 	archiveRoot := mediaArchiveDir(dbPath)
 	var verifiedRefs []ExistingMediaRef
-	if sameImportSourcePath(opts.ExistingMediaSourcePath, source.path) {
+	if sameImportSourcePath(opts.ExistingMediaSourcePath, source.Path) {
 		for _, ref := range opts.ExistingMediaRefs {
 			f, err := localfile.OpenRegular(archiveRoot, ref.MediaPath)
 			if err != nil {
@@ -85,7 +92,7 @@ func Import(ctx context.Context, opts ImportOptions, dbPath string) (ImportResul
 		}
 		defer func() { _ = os.RemoveAll(mediaTempDir) }()
 	}
-	result, err := importTDataGo(ctx, source.path, opts, dbPath, mediaTempDir)
+	result, err := importTDataGo(ctx, source, opts, dbPath, mediaTempDir)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -112,10 +119,7 @@ func importMediaArchiveDir(opts ImportOptions, dbPath string) string {
 }
 
 func sourceIdentity(kind string, values ...string) string {
-	sort.Strings(values)
-	values = slices.Compact(values)
-	digest := sha256.Sum256([]byte(kind + "\x00" + strings.Join(values, "\x00")))
-	return fmt.Sprintf("%s:%x", kind, digest[:])
+	return store.SourceIdentity(kind, values...)
 }
 
 func firstNonEmpty(values ...string) string {

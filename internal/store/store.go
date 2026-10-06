@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +30,7 @@ type ImportStats struct {
 	SourcePath             string    `json:"source_path"`
 	SourcePathCanonical    bool      `json:"-"`
 	SourceIdentity         string    `json:"-"`
+	SourceUserID           int64     `json:"-"`
 	AdoptSource            bool      `json:"-"`
 	DBPath                 string    `json:"db_path"`
 	Chats                  int       `json:"chats"`
@@ -337,7 +341,7 @@ func ensureMergeSource(ctx context.Context, tx *sql.Tx, stats ImportStats, _ []M
 	var storedIdentity string
 	err := tx.QueryRowContext(ctx, `select value from sync_state where key='source_identity'`).Scan(&storedIdentity)
 	if err == nil {
-		if storedIdentity != sourceIdentity {
+		if storedIdentity != sourceIdentity && !sameAccountIdentity(storedIdentity, sourceIdentity, stats.SourceUserID) {
 			return errors.New("refusing to merge a different Telegram source identity; use --restore")
 		}
 		return nil
@@ -371,6 +375,40 @@ func ensureMergeSource(ctx context.Context, tx *sql.Tx, stats ImportStats, _ []M
 		return errors.New("refusing to merge into archive with unknown source; use --adopt-source or --restore")
 	}
 	return nil
+}
+
+// SourceIdentity derives the identity an archive stores for its Telegram
+// data source: a stable tag binding the source kind (tdata directory,
+// dedicated session) and the account id.
+func SourceIdentity(kind string, values ...string) string {
+	sort.Strings(values)
+	values = slices.Compact(values)
+	digest := sha256.Sum256([]byte(kind + "\x00" + strings.Join(values, "\x00")))
+	return fmt.Sprintf("%s:%x", kind, digest[:])
+}
+
+// trustedSourceIdentityKinds are the kinds whose identities describe the
+// same data when the Telegram account matches: switching an archive between
+// tdata and a dedicated session re-anchors one account, not a new source.
+var trustedSourceIdentityKinds = []string{"tdata", "session"}
+
+// sameAccountIdentity reports whether a stored identity and an incoming one
+// are two trusted-kind identities of the same Telegram account. The user id
+// participates in the identity digest, so a different account never matches.
+func sameAccountIdentity(storedIdentity, incomingIdentity string, userID int64) bool {
+	if userID == 0 || storedIdentity == "" || incomingIdentity == "" {
+		return false
+	}
+	id := strconv.FormatInt(userID, 10)
+	trusted := func(identity string) bool {
+		for _, kind := range trustedSourceIdentityKinds {
+			if identity == SourceIdentity(kind, id) {
+				return true
+			}
+		}
+		return false
+	}
+	return trusted(storedIdentity) && trusted(incomingIdentity)
 }
 
 func sourceArchiveEmpty(ctx context.Context, tx *sql.Tx) (bool, error) {

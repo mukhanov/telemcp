@@ -392,8 +392,8 @@ func TestMediaFetcherDedupesAndOrders(t *testing.T) {
 	}
 }
 
-func TestDownloadViaTDataMissingSource(t *testing.T) {
-	_, err := DownloadViaTData(context.Background(), filepath.Join(t.TempDir(), "missing"), "456", nil, DownloadOptions{})
+func TestDownloadMediaAuthorizedMissingSource(t *testing.T) {
+	_, err := DownloadMediaAuthorized(context.Background(), filepath.Join(t.TempDir(), "missing"), "456", nil, DownloadOptions{})
 	if err == nil {
 		t.Fatal("missing tdata source must fail")
 	}

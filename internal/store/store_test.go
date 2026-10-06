@@ -635,3 +635,40 @@ pragma user_version = 2;
 		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
 	}
 }
+
+func TestMergeSourceAdoptsSameAccountAcrossAuthKinds(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t, filepath.Join(t.TempDir(), "cross-kind-source.db"))
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	tdataIdentity := SourceIdentity("tdata", "7")
+	if err := st.ReplaceAll(ctx, ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: tdataIdentity, FinishedAt: now}, nil, []Chat{{JID: "100", Kind: "chat"}}, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same account on a dedicated session re-anchors instead of refusing.
+	sessionIdentity := SourceIdentity("session", "7")
+	chat := Chat{JID: "200", Kind: "chat", Name: "from session"}
+	if err := st.MergeAll(ctx, ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: sessionIdentity, SourceUserID: 7, FinishedAt: now}, nil, []Chat{chat}, nil, nil, nil, nil); err != nil {
+		t.Fatalf("cross-kind merge for the same account: %v", err)
+	}
+	var stored string
+	if err := st.db.QueryRowContext(ctx, `select value from sync_state where key='source_identity'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != sessionIdentity {
+		t.Fatalf("stored identity = %q, want re-anchored %q", stored, sessionIdentity)
+	}
+
+	// A different account stays refused.
+	if err := st.MergeAll(ctx, ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: SourceIdentity("session", "9"), SourceUserID: 9, FinishedAt: now}, nil, []Chat{{JID: "300", Kind: "chat"}}, nil, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "different Telegram source identity") {
+		t.Fatalf("foreign account merge err = %v, want identity refusal", err)
+	}
+
+	// Without a user id the exact-match rule applies as before.
+	if err := st.MergeAll(ctx, ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: SourceIdentity("tdata", "7"), FinishedAt: now}, nil, []Chat{{JID: "400", Kind: "chat"}}, nil, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "different Telegram source identity") {
+		t.Fatalf("identity mismatch without user id err = %v, want refusal", err)
+	}
+	if err := st.MergeAll(ctx, ImportStats{SourcePath: t.TempDir(), SourcePathCanonical: true, SourceIdentity: sessionIdentity, FinishedAt: now}, nil, []Chat{{JID: "500", Kind: "chat"}}, nil, nil, nil, nil); err != nil {
+		t.Fatalf("exact identity merge: %v", err)
+	}
+}

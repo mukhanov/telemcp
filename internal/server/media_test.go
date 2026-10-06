@@ -226,7 +226,7 @@ var realRemoteMediaFetch = func(ctx context.Context, dbPath, chatID string, msgI
 		return nil, err
 	}
 	defer func() { _ = release() }()
-	return telegram.DownloadViaTData(ctx, os.Getenv("TELEMCP_SOURCE"), chatID, msgIDs, telegram.DownloadOptions{
+	return telegram.DownloadMediaAuthorized(ctx, os.Getenv("TELEMCP_SOURCE"), chatID, msgIDs, telegram.DownloadOptions{
 		Dest:     dest,
 		MaxBytes: maxMB * 1024 * 1024,
 	})

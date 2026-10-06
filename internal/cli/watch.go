@@ -11,6 +11,9 @@ import (
 	"github.com/mukhanov/telemcp/internal/telegram"
 )
 
+// watchFlow is the seam the watch tests stub out.
+var watchFlow = telegram.Watch
+
 // runWatch starts the resident live-sync daemon: incoming updates are merged
 // into the archive as they arrive, and periodic full passes cover everything
 // the live path defers (edits, counters, media, chat metadata).
@@ -18,6 +21,7 @@ func (r *runtime) runWatch(args []string) error {
 	fs := flag.NewFlagSet("telemcp watch", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("path", r.source, "")
+	session := fs.String("session", "", "")
 	dialogsLimit := fs.Int("dialogs-limit", 200, "")
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	fetchMedia := fs.Bool("fetch-media", false, "")
@@ -57,9 +61,10 @@ func (r *runtime) runWatch(args []string) error {
 				return r.mergeImportResult(st, &result, mediaStage, mediaCache)
 			},
 		}
-		err := telegram.Watch(r.ctx, telegram.WatchOptions{
+		err := watchFlow(r.ctx, telegram.WatchOptions{
 			ImportOptions: telegram.ImportOptions{
 				Path:                    *path,
+				SessionPath:             *session,
 				DialogsLimit:            *dialogsLimit,
 				MessagesLimit:           *messagesLimit,
 				FetchMedia:              *fetchMedia,

@@ -54,7 +54,7 @@ type runtime struct {
 	source string
 }
 
-// Run executes the sync subcommands (import, watch). args includes the
+// Run executes the subcommands (import, watch, login). args includes the
 // subcommand name, e.g. []string{"watch", "--reconcile-every", "30m"}.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -78,6 +78,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return r.runImport(rest[1:])
 	case "watch":
 		return r.runWatch(rest[1:])
+	case "login":
+		return r.runLogin(rest[1:])
 	default:
 		return usageErr(fmt.Errorf("unknown command %q", rest[0]))
 	}
@@ -102,10 +104,14 @@ func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
 	return nil
 }
 
+// importFlow is the seam the import tests stub out.
+var importFlow = telegram.Import
+
 func (r *runtime) runImport(args []string) error {
 	fs := flag.NewFlagSet("telemcp import", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("path", r.source, "")
+	session := fs.String("session", "", "")
 	dialogsLimit := fs.Int("dialogs-limit", 200, "")
 	messagesLimit := fs.Int("messages-limit", 500, "")
 	fetchMedia := fs.Bool("fetch-media", false, "")
@@ -135,8 +141,9 @@ func (r *runtime) runImport(args []string) error {
 				return err
 			}
 		}
-		result, err := telegram.Import(r.ctx, telegram.ImportOptions{
+		result, err := importFlow(r.ctx, telegram.ImportOptions{
 			Path:                    *path,
+			SessionPath:             *session,
 			DialogsLimit:            *dialogsLimit,
 			MessagesLimit:           *messagesLimit,
 			FetchMedia:              *fetchMedia,

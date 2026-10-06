@@ -13,8 +13,6 @@ import (
 	"time"
 
 	gotdlog "github.com/gotd/log"
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/session/tdesktop"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message/peer"
 	querymessages "github.com/gotd/td/telegram/query/messages"
@@ -48,7 +46,8 @@ type WatchHooks struct {
 	Reconcile func(ctx context.Context, st *store.Store, result ImportResult, mediaStage string) error
 }
 
-// Watch runs the resident daemon: one persistent tdata-authorized connection
+// Watch runs the resident daemon: one persistent connection authorized by the
+// resolved auth source (telemcp session file when present, tdata otherwise)
 // that receives live updates into the archive, plus periodic full reconcile
 // passes on the same connection. It blocks until ctx is cancelled. The store
 // connection stays the caller's: the daemon writes through it only, so every
@@ -65,17 +64,23 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 	}
 	defer func() { _ = release() }()
 
-	source := resolveImportSource(strings.TrimSpace(opts.Path))
-	canonicalPath, err := canonicalImportSourcePath(source.path)
+	source, err := ResolveAuthSource(opts.SessionPath)
+	if err != nil {
+		return fmt.Errorf("resolve Telegram auth source: %w", err)
+	}
+	canonicalPath, err := canonicalImportSourcePath(source.Path)
 	if err != nil {
 		return fmt.Errorf("resolve Telegram source target: %w", err)
 	}
-	source.path = canonicalPath
+	source.Path = canonicalPath
+	if opts.Progress != nil {
+		fmt.Fprintf(opts.Progress, "watch: source: %s %s\n", source.Kind, source.Path)
+	}
 
 	// Mirror Import(): keep only existing media refs that still resolve.
 	archiveRoot := mediaArchiveDir(dbPath)
 	var verifiedRefs []ExistingMediaRef
-	if sameImportSourcePath(opts.ExistingMediaSourcePath, source.path) {
+	if sameImportSourcePath(opts.ExistingMediaSourcePath, source.Path) {
 		for _, ref := range opts.ExistingMediaRefs {
 			f, err := localfile.OpenRegular(archiveRoot, ref.MediaPath)
 			if err != nil {
@@ -87,27 +92,20 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 	}
 	opts.ExistingMediaRefs = verifiedRefs
 
-	accounts, err := tdesktop.Read(source.path, nil)
+	creds, err := ResolveAppCredentials()
 	if err != nil {
-		return fmt.Errorf("read Telegram Desktop tdata: %w", err)
+		return err
 	}
-	if len(accounts) == 0 {
-		return errors.New("no Telegram Desktop accounts found")
-	}
-	data, err := session.TDesktopSession(accounts[0])
+	storage, err := source.SessionStorage(ctx)
 	if err != nil {
-		return fmt.Errorf("read Telegram Desktop session: %w", err)
-	}
-	storage := &session.StorageMemory{}
-	if err := (&session.Loader{Storage: storage}).Save(ctx, data); err != nil {
-		return fmt.Errorf("store Telegram Desktop session: %w", err)
+		return err
 	}
 
 	handler := &watchHandler{
 		hooks:      hooks,
 		st:         st,
 		progress:   opts.Progress,
-		sourcePath: source.path,
+		sourcePath: source.Path,
 		liveOpts:   liveImportOptions(opts.ImportOptions),
 		reconcile:  make(chan struct{}, 1),
 	}
@@ -126,19 +124,12 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 
 	// Setting UpdateHandler switches NoUpdates off; one connection then feeds
 	// both the live path and the reconcile passes below.
-	client := telegram.NewClient(telegramDesktopAPIID, telegramDesktopAPIHash, telegram.Options{
+	client := telegram.NewClient(int(creds.ID), creds.Hash, telegram.Options{
 		SessionStorage: storage,
 		UpdateHandler:  manager,
 		AllowCDN:       true,
 		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(opts.Progress)},
-		Device: telegram.DeviceConfig{
-			DeviceModel:    "Desktop",
-			SystemVersion:  "Windows 11",
-			AppVersion:     "6.5 x64",
-			SystemLangCode: "en-US",
-			LangPack:       "tdesktop",
-			LangCode:       "en",
-		},
+		Device:         telegramDeviceConfig(),
 	})
 
 	return client.Run(ctx, func(ctx context.Context) error {
@@ -149,16 +140,17 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 		handler.selfID = self.ID
 		handler.raw = tg.NewClient(client)
 		handler.stats = store.ImportStats{
-			SourcePath:          source.path,
+			SourcePath:          source.Identity(),
 			SourcePathCanonical: true,
-			SourceIdentity:      sourceIdentity("tdata", strconv.FormatInt(self.ID, 10)),
+			SourceIdentity:      sourceIdentity(source.Kind, strconv.FormatInt(self.ID, 10)),
+			SourceUserID:        self.ID,
 			DBPath:              dbPath,
 		}
 		handler.liveSession = &tdataImportSession{
 			raw:        handler.raw,
 			selfID:     self.ID,
 			opts:       handler.liveOpts,
-			sourcePath: source.path,
+			sourcePath: source.Path,
 		}
 		if opts.Progress != nil {
 			fmt.Fprintf(opts.Progress, "watch: authorized as %d; receiving live updates\n", self.ID)
@@ -560,8 +552,8 @@ func acquireWatchLock(dbPath string) (func() error, error) {
 
 // AcquireConnectionLock exposes the archive connection guard: an exclusive
 // non-blocking flock on <dbdir>/watch.lock. Media downloads that open an
-// ephemeral Telegram connection (DownloadViaTData) take it so they cannot
-// race the watch daemon on the same auth key.
+// ephemeral Telegram connection (DownloadMediaAuthorized) take it so they
+// cannot race the watch daemon on the same auth key.
 func AcquireConnectionLock(dbPath string) (func() error, error) {
 	return acquireWatchLock(dbPath)
 }
