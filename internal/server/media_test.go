@@ -35,7 +35,13 @@ var mediaFixtureBase = time.Date(2026, 3, 4, 12, 0, 0, 0, time.UTC)
 //   - chat "555000" (empty name): message 601 a voice note whose file exists.
 func mediaFixture(t *testing.T) (*archive.DB, string, string) {
 	t.Helper()
-	dir := t.TempDir()
+	// A short directory: the control-socket tests bind watch.sock next to the
+	// archive, and macOS rejects unix paths longer than 104 bytes.
+	dir, err := os.MkdirTemp("", "tmcpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	dbPath := filepath.Join(dir, "telemcp.db")
 	sqlDB, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
@@ -209,27 +215,7 @@ func forbidRemoteFetch(t *testing.T) {
 // implementation (captured before any stub runs).
 func useRealRemoteFetch(t *testing.T) {
 	t.Helper()
-	remoteMediaFetch = realRemoteMediaFetch
-}
-
-// realRemoteMediaFetch is the production implementation of remoteMediaFetch.
-var realRemoteMediaFetch = func(ctx context.Context, dbPath, chatID string, msgIDs []int, dest string, maxMB int64) ([]telegram.MediaDownload, error) {
-	files, err := fetchViaControlSocket(ctx, dbPath, chatID, msgIDs, dest, maxMB)
-	if err == nil {
-		return files, nil
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	release, err := telegram.AcquireConnectionLock(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = release() }()
-	return telegram.DownloadMediaAuthorized(ctx, os.Getenv("TELEMCP_SOURCE"), chatID, msgIDs, telegram.DownloadOptions{
-		Dest:     dest,
-		MaxBytes: maxMB * 1024 * 1024,
-	})
+	remoteMediaFetch = remoteMediaFetchImpl
 }
 
 func TestDownloadMediaArchiveCopyAndRemote(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const (
@@ -19,6 +20,8 @@ const (
 	controlMaxRequestBytes = 64 << 10
 	// controlMaxMessages caps the per-request message id count.
 	controlMaxMessages = 200
+	// controlDrainTimeout bounds the drain of an oversized request line.
+	controlDrainTimeout = 10 * time.Second
 )
 
 // mediaDownloader is the piece of the live connection the control socket
@@ -188,15 +191,19 @@ func serveControlConn(ctx context.Context, conn net.Conn, fetcher mediaDownloade
 
 // readControlRequest reads and validates one request line, capped at
 // controlMaxRequestBytes. A final line without the trailing newline is
-// tolerated.
+// tolerated. An oversized line is drained to its end before the error is
+// returned: closing the connection with unread bytes still queued makes
+// Linux reset the peer, destroying the queued error response.
 func readControlRequest(conn net.Conn) (controlRequest, error) {
 	var req controlRequest
 	reader := bufio.NewReaderSize(conn, controlMaxRequestBytes)
 	line, err := reader.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		drainOversizedLine(conn, reader)
+		return req, fmt.Errorf("request line exceeds %d bytes", controlMaxRequestBytes)
+	}
 	if err != nil {
 		switch {
-		case errors.Is(err, bufio.ErrBufferFull):
-			return req, fmt.Errorf("request line exceeds %d bytes", controlMaxRequestBytes)
 		case errors.Is(err, io.EOF) && len(line) > 0:
 			// tolerate a final line without the newline
 		default:
@@ -211,6 +218,24 @@ func readControlRequest(conn net.Conn) (controlRequest, error) {
 		return req, fmt.Errorf("parse request: %w", err)
 	}
 	return req, req.validate()
+}
+
+// drainOversizedLine consumes the remainder of an oversized request line so
+// the connection can be closed cleanly after the error response. The drain
+// is deadline-bounded: an abusive sender cannot hold the goroutine.
+func drainOversizedLine(conn net.Conn, reader *bufio.Reader) {
+	if err := conn.SetReadDeadline(time.Now().Add(controlDrainTimeout)); err != nil {
+		return
+	}
+	for {
+		if _, err := reader.ReadSlice('\n'); err != nil {
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
+			}
+			return // EOF, timeout or reset: nothing more to drain
+		}
+		return
+	}
 }
 
 // writeControlResponse writes one response line; the connection closes right

@@ -290,13 +290,18 @@ func (e *daemonRejectedError) Error() string { return "daemon download failed: "
 // (telemcp session file when one resolves, tdata otherwise) under the archive
 // connection lock. It is a package var so tests can stub the Telegram side
 // out.
-var remoteMediaFetch = func(ctx context.Context, dbPath, chatID string, msgIDs []int, dest string, maxMB int64) ([]telegram.MediaDownload, error) {
+// remoteMediaFetchImpl is the production transport chain; remoteMediaFetch
+// is a var so tests can stub it out and restore this named implementation.
+func remoteMediaFetchImpl(ctx context.Context, dbPath, chatID string, msgIDs []int, dest string, maxMB int64) ([]telegram.MediaDownload, error) {
 	files, err := fetchViaControlSocket(ctx, dbPath, chatID, msgIDs, dest, maxMB)
 	if err == nil {
 		return files, nil
 	}
 	var rejected *daemonRejectedError
-	if errors.As(err, &rejected) || ctx.Err() != nil {
+	if errors.As(err, &rejected) {
+		return nil, err
+	}
+	if ctx.Err() != nil {
 		return nil, err
 	}
 	// No daemon (or the control socket failed): open our own ephemeral
@@ -311,6 +316,13 @@ var remoteMediaFetch = func(ctx context.Context, dbPath, chatID string, msgIDs [
 		MaxBytes: maxMB * 1024 * 1024,
 	})
 }
+
+// remoteMediaFetch downloads the given messages' media over Telegram: the
+// watch daemon's control socket first, then a direct ephemeral connection
+// (telemcp session file when one resolves, tdata otherwise) under the archive
+// connection lock. It is a package var so tests can stub the Telegram side
+// out.
+var remoteMediaFetch = remoteMediaFetchImpl
 
 // downloadMediaRequest is the fixed wire format of the daemon control
 // socket's download_media request line.
