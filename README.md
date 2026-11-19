@@ -103,6 +103,9 @@ gentlest option for the account.
   other watcher for the same database first. A manual `telemcp import`
   refuses to run while the daemon holds the lock.
 
+  The daemon checks the Telegram connection every minute. A failed or stalled
+  check terminates the process so launchd's `KeepAlive` starts a clean
+  connection instead of leaving the archive silently stale.
 - **`telemcp import`** on a schedule (cron/launchd): repeated imports merge
   idempotently (no duplicates); `--messages-limit 100` keeps periodic syncs
   fast.

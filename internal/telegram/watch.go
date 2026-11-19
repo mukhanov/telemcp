@@ -169,6 +169,12 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 			return nil
 		})
 		g.Go(func() error {
+			return watchConnectionMonitor(gctx, watchHealthCheckInterval, watchHealthCheckTimeout, func(ctx context.Context) error {
+				_, err := client.Self(ctx)
+				return err
+			})
+		})
+		g.Go(func() error {
 			cleanupControl, err := serveControlSocket(gctx, dbPath, mediaFetch, handler.logf)
 			if err != nil {
 				// Downloads still work without the socket (the MCP server
@@ -183,6 +189,32 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 		})
 		return g.Wait()
 	})
+}
+
+const (
+	watchHealthCheckInterval = time.Minute
+	watchHealthCheckTimeout  = 15 * time.Second
+)
+
+// watchConnectionMonitor turns a dead or half-open Telegram connection into a
+// daemon exit. The updates manager can keep logging RPC write errors while the
+// client remains stuck; launchd's KeepAlive then starts a clean connection.
+func watchConnectionMonitor(ctx context.Context, interval, timeout time.Duration, check func(context.Context) error) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			checkCtx, cancel := context.WithTimeout(ctx, timeout)
+			err := check(checkCtx)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("watch: Telegram connection health check: %w", err)
+			}
+		}
+	}
 }
 
 // liveImportOptions derives the conversion options for the push path: no media
