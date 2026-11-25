@@ -261,6 +261,24 @@ func TestConnHealthResetsSilentConnection(t *testing.T) {
 	}
 }
 
+func TestConnHealthResetsOnTheDeadline(t *testing.T) {
+	cfg := connHealthConfig{probeEvery: 200 * time.Millisecond, probeTimeout: 50 * time.Millisecond, stalledAfter: 600 * time.Millisecond}
+	h, ctx := newConnHealth(context.Background(), cfg, watchStateLog{}, nil)
+	defer h.stop()
+	time.Sleep(10 * time.Millisecond)
+	h.answered()
+	answered := time.Now()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a connection that stopped answering was not reset")
+	}
+	// Not on some later tick: the reset comes stalledAfter after the last answer.
+	if elapsed := time.Since(answered); elapsed < cfg.stalledAfter || elapsed > cfg.stalledAfter+100*time.Millisecond {
+		t.Fatalf("reset %s after the last answer, want %s", elapsed, cfg.stalledAfter)
+	}
+}
+
 func TestConnHealthKeepsAnsweringConnection(t *testing.T) {
 	h, ctx := newConnHealth(context.Background(), fastConnHealth(), watchStateLog{}, nil)
 	defer h.stop()

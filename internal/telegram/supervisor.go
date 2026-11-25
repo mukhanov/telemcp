@@ -535,23 +535,50 @@ func (h *connHealth) connectionState(state telegram.ConnectionState) {
 }
 
 func (h *connHealth) loop(ctx context.Context) {
-	ticker := time.NewTicker(h.cfg.probeEvery)
-	defer ticker.Stop()
+	// Waking on a deadline rather than on a ticker makes the reset land
+	// stalledAfter after the last answer, not on some later tick.
+	timer := time.NewTimer(h.cfg.probeEvery)
+	defer timer.Stop()
+	var lastProbe time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case tick := <-ticker.C:
-			idle, ready := h.measure(tick)
+		case now := <-timer.C:
+			idle, ready := h.measure(now)
 			if idle >= h.cfg.stalledAfter {
 				h.stall(idle)
 				return
 			}
-			if ready && idle >= h.cfg.probeEvery {
+			if ready && idle >= h.cfg.probeEvery && now.Sub(lastProbe) >= h.cfg.probeEvery {
+				lastProbe = now
 				h.probeConnection(ctx)
 			}
+			timer.Reset(h.nextWake(ready, lastProbe))
 		}
 	}
+}
+
+// nextWake is how long the loop may sleep: until the connection would count
+// as stalled, or until a quiet connection is due for its next probe,
+// whichever comes first.
+func (h *connHealth) nextWake(ready bool, lastProbe time.Time) time.Duration {
+	h.mu.Lock()
+	wake, alive := h.lastAlive.Add(h.cfg.stalledAfter), h.lastAlive
+	h.mu.Unlock()
+	if ready {
+		probe := lastProbe
+		if alive.After(probe) {
+			probe = alive
+		}
+		if next := probe.Add(h.cfg.probeEvery); next.Before(wake) {
+			wake = next
+		}
+	}
+	if d := time.Until(wake); d > time.Millisecond {
+		return d
+	}
+	return time.Millisecond
 }
 
 // measure returns how long the connection went without an answer and
