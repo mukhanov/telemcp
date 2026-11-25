@@ -121,6 +121,11 @@ gentlest option for the account.
   from the stored pts covers the gap. A session Telegram rejected (401) is
   retried every 30 minutes and needs `telemcp login`.
 
+  API requests start at most ten a second. Telegram answers a burst with
+  `FLOOD_WAIT` and stops answering a connection that keeps tripping it,
+  which the daemon reads as a stall; the updates manager alone starts a
+  request per channel.
+
   launchd stays as the crash net, but it does not always honor `KeepAlive`:
   it can park the spawn after an exit and leave the daemon off until
   something starts it by hand. `telemcp status` shows the daemon, its
