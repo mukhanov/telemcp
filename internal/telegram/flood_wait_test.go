@@ -10,12 +10,14 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
 
 func TestTelegramFloodWaitPolicyRetriesAndReports(t *testing.T) {
 	var progress bytes.Buffer
 	policy := newTelegramFloodWaitPolicy(&progress)
+	policy.interval = 0
 	var waits []time.Duration
 	policy.sleep = func(_ context.Context, delay time.Duration) error {
 		waits = append(waits, delay)
@@ -59,6 +61,39 @@ func TestTelegramFloodWaitPolicyCancellation(t *testing.T) {
 	}
 }
 
+func TestTelegramFloodWaitPolicyPacesRequestStarts(t *testing.T) {
+	policy := newTelegramFloodWaitPolicy(nil)
+	policy.interval = time.Second
+	var waits []time.Duration
+	policy.sleep = func(_ context.Context, delay time.Duration) error {
+		waits = append(waits, delay)
+		return nil
+	}
+	next := telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error { return nil })
+	invoke := policy.Handle(next)
+	ctx := context.Background()
+
+	invoke(ctx, nil, nil) // an idle daemon sends its first request at once
+	invoke(ctx, nil, nil)
+	if len(waits) != 1 || waits[0] <= 0 || waits[0] > time.Second {
+		t.Fatalf("waits = %v, want one wait of about the interval", waits)
+	}
+	// File parts and the liveness probe never queue.
+	_ = invoke(ctx, &tg.UploadGetFileRequest{}, nil)
+	_ = invoke(ctx, &tg.UpdatesGetStateRequest{}, nil)
+	if len(waits) != 1 {
+		t.Fatalf("waits = %v: file parts and the probe must not be paced", waits)
+	}
+
+	// A shutdown ends the wait.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	policy.sleep = telegramFloodWaitSleep
+	if err := invoke(canceled, nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v during a shutdown, want context.Canceled", err)
+	}
+}
+
 func TestTelegramFloodWaitPolicyRejectsWaitAboveLimit(t *testing.T) {
 	policy := newTelegramFloodWaitPolicy(nil)
 	policy.sleep = func(context.Context, time.Duration) error {
@@ -80,6 +115,7 @@ func TestTelegramFloodWaitPolicyRejectsWaitAboveLimit(t *testing.T) {
 
 func TestTelegramFloodWaitPolicyAcceptsWaitAtLimit(t *testing.T) {
 	policy := newTelegramFloodWaitPolicy(nil)
+	policy.interval = 0
 	var wait time.Duration
 	policy.sleep = func(_ context.Context, delay time.Duration) error {
 		wait = delay
@@ -104,6 +140,7 @@ func TestTelegramFloodWaitPolicyAcceptsWaitAtLimit(t *testing.T) {
 
 func TestTelegramFloodWaitPolicyStopsAtRetryLimit(t *testing.T) {
 	policy := newTelegramFloodWaitPolicy(nil)
+	policy.interval = 0
 	waits := 0
 	policy.sleep = func(context.Context, time.Duration) error {
 		waits++

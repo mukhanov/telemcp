@@ -543,7 +543,7 @@ func (h *connHealth) loop(ctx context.Context) {
 			return
 		case tick := <-ticker.C:
 			idle, ready := h.measure(tick)
-			if idle > h.cfg.stalledAfter {
+			if idle >= h.cfg.stalledAfter {
 				h.stall(idle)
 				return
 			}
