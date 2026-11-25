@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,37 +10,6 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/mukhanov/telemcp/internal/store"
 )
-
-func TestWatchConnectionMonitorStopsTransportFailure(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	brokenPipe := errors.New("broken pipe")
-	checked := false
-
-	err := watchConnectionMonitor(ctx, time.Millisecond, time.Second, func(context.Context) error {
-		checked = true
-		return brokenPipe
-	})
-	if !errors.Is(err, brokenPipe) {
-		t.Fatalf("error = %v, want broken pipe", err)
-	}
-	if !checked {
-		t.Fatal("health check was not called")
-	}
-}
-
-func TestWatchConnectionMonitorTimesOutStalledRequest(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	err := watchConnectionMonitor(ctx, time.Millisecond, 10*time.Millisecond, func(ctx context.Context) error {
-		<-ctx.Done()
-		return ctx.Err()
-	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want health-check deadline exceeded", err)
-	}
-}
 
 // tgTestUser builds a user with the flag-aware setters, so optional-field
 // getters (FirstName, Username, ...) behave as after a wire decode.

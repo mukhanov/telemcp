@@ -7,13 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	gotdlog "github.com/gotd/log"
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message/peer"
 	querymessages "github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/telegram/updates"
@@ -21,7 +19,6 @@ import (
 	"github.com/gotd/td/tgerr"
 	"github.com/mukhanov/telemcp/internal/localfile"
 	"github.com/mukhanov/telemcp/internal/store"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
 
@@ -32,6 +29,9 @@ type WatchOptions struct {
 	// connection; zero disables periodic passes (the startup pass and
 	// gap-triggered passes still run).
 	ReconcileEvery time.Duration
+	// ReconnectMaxWait caps the wait between two connection attempts once
+	// the daemon is reconnecting; zero means DefaultReconnectMaxWait.
+	ReconnectMaxWait time.Duration
 }
 
 // WatchHooks receive converted data as it arrives. Every hook gets the single
@@ -46,16 +46,17 @@ type WatchHooks struct {
 	Reconcile func(ctx context.Context, st *store.Store, result ImportResult, mediaStage string) error
 }
 
-// Watch runs the resident daemon: one persistent connection authorized by the
-// resolved auth source (telemcp session file when present, tdata otherwise)
-// that receives live updates into the archive, plus periodic full reconcile
-// passes on the same connection. It blocks until ctx is cancelled. The store
-// connection stays the caller's: the daemon writes through it only, so every
-// archive write serializes on one SQLite connection.
+// Watch runs the resident daemon: a connection authorized by the resolved
+// auth source (telemcp session file when present, tdata otherwise) that
+// receives live updates into the archive, plus periodic full reconcile
+// passes on the same connection. Lost connections are rebuilt in place; the
+// daemon returns only when ctx is cancelled. The store connection stays the
+// caller's: the daemon writes through it only, so every archive write
+// serializes on one SQLite connection.
 //
 // The updates.Manager state (pts/qts, channel pts, access hashes) is persisted
-// in the archive itself, so a restarted daemon resumes from its saved position
-// and getDifference covers the offline gap.
+// in the archive itself, so every new connection resumes from the saved
+// position and getDifference covers the offline gap.
 func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchHooks) error {
 	dbPath := st.Path()
 	release, err := acquireWatchLock(dbPath)
@@ -101,120 +102,19 @@ func Watch(ctx context.Context, opts WatchOptions, st *store.Store, hooks WatchH
 		return err
 	}
 
-	handler := &watchHandler{
+	d := &watchDaemon{
+		opts:       opts,
 		hooks:      hooks,
 		st:         st,
-		progress:   opts.Progress,
-		sourcePath: source.Path,
-		liveOpts:   liveImportOptions(opts.ImportOptions),
-		reconcile:  make(chan struct{}, 1),
+		dbPath:     dbPath,
+		source:     source,
+		creds:      creds,
+		storage:    storage,
+		stateStore: newSQLiteUpdatesState(st),
+		log:        watchStateLog{w: opts.Progress},
 	}
-	stateStore := newSQLiteUpdatesState(st)
-	manager := updates.New(updates.Config{
-		Handler:          handler,
-		Logger:           progressLoggerOf(opts.Progress),
-		Storage:          stateStore,
-		AccessHasher:     stateStore,
-		UserAccessHasher: stateStore,
-		// The manager cannot self-recover from these gaps; a full pass can.
-		OnChannelTooLong:      func(int64) { handler.requestReconcile() },
-		OnTooLong:             func() { handler.requestReconcile() },
-		OnLoadUserStateFailed: func() { handler.requestReconcile() },
-	})
-
-	// Setting UpdateHandler switches NoUpdates off; one connection then feeds
-	// both the live path and the reconcile passes below.
-	client := telegram.NewClient(int(creds.ID), creds.Hash, telegram.Options{
-		SessionStorage: storage,
-		UpdateHandler:  manager,
-		AllowCDN:       true,
-		Middlewares:    []telegram.Middleware{newTelegramFloodWaitPolicy(opts.Progress)},
-		Device:         telegramDeviceConfig(),
-	})
-
-	return client.Run(ctx, func(ctx context.Context) error {
-		self, err := client.Self(ctx)
-		if err != nil {
-			return fmt.Errorf("telegram session is not authorized: %w", err)
-		}
-		handler.selfID = self.ID
-		handler.raw = tg.NewClient(client)
-		handler.stats = store.ImportStats{
-			SourcePath:          source.Identity(),
-			SourcePathCanonical: true,
-			SourceIdentity:      sourceIdentity(source.Kind, strconv.FormatInt(self.ID, 10)),
-			SourceUserID:        self.ID,
-			DBPath:              dbPath,
-		}
-		handler.liveSession = &tdataImportSession{
-			raw:        handler.raw,
-			selfID:     self.ID,
-			opts:       handler.liveOpts,
-			sourcePath: source.Path,
-		}
-		if opts.Progress != nil {
-			fmt.Fprintf(opts.Progress, "watch: authorized as %d; receiving live updates\n", self.ID)
-		}
-
-		g, gctx := errgroup.WithContext(ctx)
-		// One shared fetcher for the control socket: dialog peer cache is
-		// per instance, and it is safe for concurrent use.
-		mediaFetch := NewMediaFetcherWithHashes(handler.raw, self.ID, daemonPeerHashes{st: stateStore, userID: self.ID})
-		g.Go(func() error {
-			handler.bootstrapChannelPts(ctx, stateStore)
-			return manager.Run(gctx, handler.raw, self.ID, updates.AuthOptions{})
-		})
-		g.Go(func() error {
-			handler.reconcileLoop(gctx, opts, dbPath)
-			return nil
-		})
-		g.Go(func() error {
-			return watchConnectionMonitor(gctx, watchHealthCheckInterval, watchHealthCheckTimeout, func(ctx context.Context) error {
-				_, err := client.Self(ctx)
-				return err
-			})
-		})
-		g.Go(func() error {
-			cleanupControl, err := serveControlSocket(gctx, dbPath, mediaFetch, handler.logf)
-			if err != nil {
-				// Downloads still work without the socket (the MCP server
-				// falls back to an ephemeral connection); never fatal.
-				handler.logf("watch: media requests unavailable: %v\n", err)
-				return nil
-			}
-			handler.logf("watch: media requests on %s\n", ControlSocketPath(dbPath))
-			defer cleanupControl()
-			<-gctx.Done()
-			return nil
-		})
-		return g.Wait()
-	})
-}
-
-const (
-	watchHealthCheckInterval = time.Minute
-	watchHealthCheckTimeout  = 15 * time.Second
-)
-
-// watchConnectionMonitor turns a dead or half-open Telegram connection into a
-// daemon exit. The updates manager can keep logging RPC write errors while the
-// client remains stuck; launchd's KeepAlive then starts a clean connection.
-func watchConnectionMonitor(ctx context.Context, interval, timeout time.Duration, check func(context.Context) error) error {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			checkCtx, cancel := context.WithTimeout(ctx, timeout)
-			err := check(checkCtx)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("watch: Telegram connection health check: %w", err)
-			}
-		}
-	}
+	d.reconcile = newReconcileScheduler(opts, dbPath)
+	return d.run(ctx)
 }
 
 // liveImportOptions derives the conversion options for the push path: no media
@@ -233,16 +133,23 @@ func liveImportOptions(opts ImportOptions) ImportOptions {
 // from pts=1 with limit=1 makes the server answer channelDifferenceTooLong
 // carrying its current pts — the same recovery the manager itself performs for
 // UpdateChannelTooLong — which we persist so loadChannels boots live workers.
-func (h *watchHandler) bootstrapChannelPts(ctx context.Context, stateStore *sqliteUpdatesState) {
+//
+// The sweep costs one request per channel, so a reconnect must not repeat
+// it: freshness skips every channel that was checked recently enough.
+func (h *watchHandler) bootstrapChannelPts(ctx context.Context, stateStore *sqliteUpdatesState, freshness *channelBootstrap) {
 	channels, err := stateStore.st.Channels(ctx, h.selfID)
 	if err != nil {
 		h.logf("watch: channel bootstrap: list channels: %v\n", err)
 		return
 	}
-	repaired := 0
+	repaired, skipped := 0, 0
 	for _, ch := range channels {
 		if ctx.Err() != nil {
 			return
+		}
+		if !freshness.due(ch.ChannelID, time.Now()) {
+			skipped++
+			continue
 		}
 		diff, err := h.raw.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
 			Channel: &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash},
@@ -267,16 +174,20 @@ func (h *watchHandler) bootstrapChannelPts(ctx context.Context, stateStore *sqli
 				pts, _ = dialog.GetPts()
 			}
 		}
-		if pts > ch.Pts {
-			if err := stateStore.st.SetChannelPts(ctx, h.selfID, ch.ChannelID, pts); err != nil {
-				h.logf("watch: channel bootstrap: channel %d: set pts: %v\n", ch.ChannelID, err)
-				continue
-			}
-			repaired++
+		checked := time.Now()
+		if pts <= ch.Pts {
+			freshness.verified(ch.ChannelID, checked)
+			continue
 		}
+		if err := stateStore.st.SetChannelPts(ctx, h.selfID, ch.ChannelID, pts); err != nil {
+			h.logf("watch: channel bootstrap: channel %d: set pts: %v\n", ch.ChannelID, err)
+			continue
+		}
+		repaired++
+		freshness.verified(ch.ChannelID, checked)
 	}
-	if repaired > 0 {
-		h.logf("watch: channel bootstrap: repaired pts for %d of %d channels\n", repaired, len(channels))
+	if repaired > 0 || skipped > 0 {
+		h.logf("watch: channel bootstrap: repaired pts for %d of %d channels (%d skipped as recently checked)\n", repaired, len(channels), skipped)
 	}
 }
 
@@ -301,16 +212,7 @@ type watchHandler struct {
 	liveOpts    ImportOptions
 	liveSession *tdataImportSession
 	stats       store.ImportStats
-	reconcile   chan struct{}
 	mu          sync.Mutex // serializes hooks.Live batches
-}
-
-// requestReconcile schedules an out-of-band full pass (non-blocking).
-func (h *watchHandler) requestReconcile() {
-	select {
-	case h.reconcile <- struct{}{}:
-	default:
-	}
 }
 
 // Handle implements telegram.UpdateHandler.
@@ -464,42 +366,6 @@ func shortChatMessage(selfID int64, u *tg.UpdateShortChatMessage) *tg.Message {
 		msg.SetTTLPeriod(v)
 	}
 	return msg
-}
-
-// reconcileLoop runs full fetch passes: one immediately on start (covers the
-// pre-daemon gap and first-run backfill), then on the configured period, plus
-// out-of-band passes requested by the manager gap callbacks. Pass failures
-// are logged, never fatal — the daemon keeps its connection.
-func (h *watchHandler) reconcileLoop(ctx context.Context, opts WatchOptions, dbPath string) {
-	run := func() {
-		if err := h.reconcilePass(ctx, opts, dbPath); err != nil && h.progress != nil {
-			fmt.Fprintf(h.progress, "watch: reconcile pass failed: %v\n", err)
-		}
-	}
-	run()
-	if opts.ReconcileEvery <= 0 {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-h.reconcile:
-				run()
-			}
-		}
-	}
-	ticker := time.NewTicker(opts.ReconcileEvery)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-h.reconcile:
-			ticker.Reset(opts.ReconcileEvery)
-			run()
-		case <-ticker.C:
-			run()
-		}
-	}
 }
 
 // reconcilePass mirrors the Import()+runImport tail on the watch connection:

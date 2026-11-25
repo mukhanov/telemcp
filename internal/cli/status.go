@@ -91,13 +91,25 @@ type logStatus struct {
 	Tail      []string `json:"tail"`
 }
 
+// connectionStatus is what a running daemon publishes about its Telegram
+// connection; absent for a daemon that does not report one.
+type connectionStatus struct {
+	State       string `json:"state"`    // live, connecting, waiting, session_dead
+	Since       string `json:"since"`    // RFC3339
+	Attempts    int    `json:"attempts"` // connections tried since the daemon started
+	LastError   string `json:"last_error,omitempty"`
+	LastDrop    string `json:"last_drop,omitempty"`
+	NextAttempt string `json:"next_attempt,omitempty"`
+}
+
 // statusReport is one `telemcp status` report.
 type statusReport struct {
-	Daemon       daemonStatus     `json:"daemon"`
-	Supervisor   *supervisorState `json:"supervisor,omitempty"`
-	Archive      *archive.Status  `json:"archive,omitempty"`
-	ArchiveError string           `json:"archive_error,omitempty"`
-	Log          logStatus        `json:"log"`
+	Daemon       daemonStatus      `json:"daemon"`
+	Connection   *connectionStatus `json:"connection,omitempty"`
+	Supervisor   *supervisorState  `json:"supervisor,omitempty"`
+	Archive      *archive.Status   `json:"archive,omitempty"`
+	ArchiveError string            `json:"archive_error,omitempty"`
+	Log          logStatus         `json:"log"`
 }
 
 // runStatus reports whether the archive's watch daemon is alive, what the
@@ -144,6 +156,9 @@ func collectStatus(ctx context.Context, dbPath, label string) *statusReport {
 			}
 		}
 	}
+	if rep.Daemon.State != daemonStopped {
+		rep.Connection = readConnection(dbPath, rep.Daemon.PID)
+	}
 	db, err := archive.Open(dbPath)
 	if err != nil {
 		rep.ArchiveError = err.Error()
@@ -158,6 +173,26 @@ func collectStatus(ctx context.Context, dbPath, label string) *statusReport {
 	}
 	rep.Log.LastWrite, rep.Log.Tail = readWatchLog(rep.Log.Path)
 	return rep
+}
+
+// readConnection returns the connection state a live daemon published. The
+// file outlives a killed daemon, so it only counts for the process at pid.
+func readConnection(dbPath string, pid int) *connectionStatus {
+	st, err := telegram.ReadWatchState(dbPath)
+	if err != nil {
+		return &connectionStatus{State: "unknown", LastError: err.Error()}
+	}
+	if st == nil || pid != 0 && st.PID != 0 && st.PID != pid {
+		return nil // a stale file of an earlier daemon
+	}
+	c := &connectionStatus{State: st.State, Since: st.Since.Format(time.RFC3339), Attempts: st.Attempts, LastError: st.LastError}
+	if !st.LastDrop.IsZero() {
+		c.LastDrop = st.LastDrop.Format(time.RFC3339)
+	}
+	if !st.NextAttempt.IsZero() {
+		c.NextAttempt = st.NextAttempt.Format(time.RFC3339)
+	}
+	return c
 }
 
 // probeDaemon classifies the daemon from the archive's own files. The control
@@ -311,6 +346,28 @@ func (r *runtime) printStatus(rep *statusReport) error {
 		line(")")
 	}
 	line("\n")
+	if c := rep.Connection; c != nil {
+		line("connection: %s", c.State)
+		if c.Since != "" {
+			line(" since %s", localTime(c.Since))
+		}
+		switch c.State {
+		case telegram.WatchStateWaiting:
+			line(", next attempt %s", until(c.NextAttempt, now))
+		case telegram.WatchStateSessionDead:
+			line(", next attempt %s — run 'telemcp login'", until(c.NextAttempt, now))
+		}
+		if c.Attempts > 1 {
+			line(", %d reconnects", c.Attempts-1)
+		}
+		if c.LastDrop != "" {
+			line(", last drop %s", localTime(c.LastDrop))
+		}
+		line("\n")
+		if c.LastError != "" {
+			line("            last error: %s\n", c.LastError)
+		}
+	}
 
 	if s := rep.Supervisor; s != nil {
 		line("%-9s", s.Kind+":")
@@ -372,6 +429,18 @@ func localTime(s string) string {
 		return s
 	}
 	return t.Local().Format(time.DateTime)
+}
+
+// until renders how far a timestamp is from now.
+func until(s string, now time.Time) string {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	if d := t.Sub(now); d > 0 {
+		return "in " + d.Round(time.Second).String()
+	}
+	return "now"
 }
 
 // ago renders an age the way it is read off a status line.

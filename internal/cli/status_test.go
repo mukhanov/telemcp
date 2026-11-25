@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -294,5 +295,87 @@ func TestRunStatus(t *testing.T) {
 	}
 	if want := "launchd:  no job named com.u.telemcp-watch is loaded (loaded telemcp jobs: com.example.telemcp-watch; pass --label)\n"; !strings.Contains(out.String(), want) {
 		t.Fatalf("unknown label report lacks %q:\n%s", want, out.String())
+	}
+}
+
+// statusJSON runs `telemcp status --json` and decodes the report.
+func statusJSON(t *testing.T, dbPath string) (statusReport, string) {
+	t.Helper()
+	var out strings.Builder
+	if err := Run(context.Background(), []string{"--db", dbPath, "--json", "status"}, &out, &strings.Builder{}); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	var rep statusReport
+	if err := json.Unmarshal([]byte(out.String()), &rep); err != nil {
+		t.Fatalf("decode report %s: %v", out.String(), err)
+	}
+	return rep, out.String()
+}
+
+func TestRunStatusShowsConnection(t *testing.T) {
+	stubSupervisor(t, nil)
+	dbPath := openArchive(t)
+	listenControl(t, dbPath)
+	statePath := filepath.Join(filepath.Dir(dbPath), "watch.state")
+
+	// A daemon that publishes no state reports none.
+	if rep, _ := statusJSON(t, dbPath); rep.Connection != nil {
+		t.Fatalf("connection = %+v without a state file", *rep.Connection)
+	}
+
+	next := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	state := fmt.Sprintf(`{"pid":0,"state":"waiting","since":"2026-11-25T13:33:12+03:00","attempts":3,"last_error":"connection lost: write tcp: broken pipe","last_drop":"2026-11-25T13:33:12+03:00","next_attempt":%q}`, next)
+	publish := func(body string) {
+		if err := os.WriteFile(statePath, []byte(body), 0o600); err != nil {
+			t.Fatalf("write state: %v", err)
+		}
+	}
+	publish(state)
+	rep, _ := statusJSON(t, dbPath)
+	if rep.Connection == nil || rep.Connection.State != telegram.WatchStateWaiting || rep.Connection.Attempts != 3 || rep.Connection.LastDrop != "2026-11-25T13:33:12+03:00" {
+		t.Fatalf("connection = %+v, want the daemon's published waiting state", rep.Connection)
+	}
+
+	var out strings.Builder
+	if err := Run(context.Background(), []string{"--db", dbPath, "status"}, &out, &strings.Builder{}); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	for _, want := range []string{
+		"connection: waiting since " + localTime("2026-11-25T13:33:12+03:00") + ", next attempt in ",
+		", 2 reconnects, last drop " + localTime("2026-11-25T13:33:12+03:00") + "\n",
+		"            last error: connection lost: write tcp: broken pipe\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("report lacks %q:\n%s", want, out.String())
+		}
+	}
+
+	// The file outlives a killed daemon: only the pid it names may claim it.
+	stubSupervisor(t, &supervisorState{Kind: "launchd", Target: "gui/502/com.u.telemcp-watch", Loaded: true, State: "running", PID: 4242})
+	publish(strings.Replace(state, `"pid":0`, `"pid":999999`, 1))
+	if rep, _ := statusJSON(t, dbPath); rep.Connection != nil {
+		t.Fatalf("connection = %+v from the state file of an earlier daemon", *rep.Connection)
+	}
+	publish(strings.Replace(state, `"pid":0`, `"pid":4242`, 1))
+	if rep, _ := statusJSON(t, dbPath); rep.Connection == nil {
+		t.Fatal("the running daemon's state file was ignored")
+	}
+
+	// A stopped daemon has no connection, whatever the file says.
+	stubSupervisor(t, nil)
+	stopped := openArchive(t)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(stopped), "watch.state"), []byte(state), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	var down strings.Builder
+	if err := Run(context.Background(), []string{"--db", stopped, "--json", "status"}, &down, &strings.Builder{}); !errors.Is(err, errDaemonDown) {
+		t.Fatalf("stopped daemon: err = %v, want errDaemonDown", err)
+	}
+	var stoppedReport statusReport
+	if err := json.Unmarshal([]byte(down.String()), &stoppedReport); err != nil {
+		t.Fatalf("decode report %s: %v", down.String(), err)
+	}
+	if stoppedReport.Connection != nil {
+		t.Fatalf("connection = %+v for a stopped daemon", *stoppedReport.Connection)
 	}
 }

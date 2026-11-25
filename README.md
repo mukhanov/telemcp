@@ -108,12 +108,22 @@ gentlest option for the account.
   other watcher for the same database first. A manual `telemcp import`
   refuses to run while the daemon holds the lock.
 
-  The daemon checks the Telegram connection every minute. A failed or stalled
-  check terminates the process so the supervisor starts a clean connection
-  instead of leaving the archive silently stale. launchd does not always
-  honor that restart: it can park the `KeepAlive` spawn after an exit and
-  leave the daemon off until something starts it by hand. `telemcp status`
-  shows the daemon, the launchd job and the archive in one report, exits 1
+  A lost connection is rebuilt in place: the daemon exits only when it is
+  stopped. gotd's own reconnection loop covers short drops and keeps the
+  updates manager and its state. A connection that goes two minutes without
+  an answer from Telegram — a dead tunnel, or a half-open socket gotd does
+  not notice — is replaced; the daemon then waits between attempts with a
+  growing, jittered pause (15 s doubling up to `--reconnect-max-wait`, 60 s
+  by default), retries at once when the network changes, and skips the dial
+  while the routing table has no path to Telegram. A reconnect repeats
+  neither the channel bootstrap nor a full reconcile pass: `getDifference`
+  from the stored pts covers the gap. A session Telegram rejected (401) is
+  retried every 30 minutes and needs `telemcp login`.
+
+  launchd stays as the crash net, but it does not always honor `KeepAlive`:
+  it can park the spawn after an exit and leave the daemon off until
+  something starts it by hand. `telemcp status` shows the daemon, its
+  connection state, the launchd job and the archive in one report, exits 1
   while the daemon is down, and prints the `launchctl kickstart` that brings
   it back (`--json` for the same report as one object, `--label` for a job
   named other than `com.<user>.telemcp-watch`).
@@ -228,7 +238,7 @@ internal/config/      exclusion config (managed via MCP tools)
 internal/server/      MCP tool wiring
 internal/store/       archive writer: schema, idempotent merges, tombstones
 internal/telegram/    sessions (tdata + dedicated login), live updates,
-                      media downloads, import (telecrawl watch port)
+                      media downloads, import (telecrawl watch port), reconnects
 internal/cli/         watch/import/status subcommands, media staging
 internal/localfile/   path-containment guards for archived media
 contrib/              launchd templates (watch, prune)

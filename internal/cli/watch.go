@@ -28,6 +28,7 @@ func (r *runtime) runWatch(args []string) error {
 	fetchMediaMaxAge := fs.Duration("fetch-media-max-age", 0, "")
 	fetchMediaMaxMB := fs.Int64("fetch-media-max-mb", 0, "")
 	reconcileEvery := fs.Duration("reconcile-every", 30*time.Minute, "")
+	reconnectMaxWait := fs.Duration("reconnect-max-wait", telegram.DefaultReconnectMaxWait, "")
 	if err := parseFlagsOnly(fs, args); err != nil {
 		return err
 	}
@@ -39,6 +40,9 @@ func (r *runtime) runWatch(args []string) error {
 	}
 	if *reconcileEvery < 0 {
 		return usageErr(errors.New("--reconcile-every must be non-negative (0 disables periodic passes)"))
+	}
+	if *reconnectMaxWait < time.Second {
+		return usageErr(errors.New("--reconnect-max-wait must be at least 1s"))
 	}
 	return r.withStore(func(st *store.Store) error {
 		mediaCache := &mediaRefCache{}
@@ -74,7 +78,8 @@ func (r *runtime) runWatch(args []string) error {
 				ExistingMediaSourcePath: existingMediaSourcePath,
 				ExistingMediaRefs:       existingMediaRefs,
 			},
-			ReconcileEvery: *reconcileEvery,
+			ReconcileEvery:   *reconcileEvery,
+			ReconnectMaxWait: *reconnectMaxWait,
 		}, st, hooks)
 		if errors.Is(err, context.Canceled) {
 			return nil // graceful shutdown (SIGINT/SIGTERM): not an error

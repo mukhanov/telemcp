@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mukhanov/telemcp/internal/store"
 	"github.com/mukhanov/telemcp/internal/telegram"
@@ -188,5 +189,41 @@ func TestRunWatchPassesSessionFlag(t *testing.T) {
 	}
 	if gotOpts.SessionPath != sessionPath {
 		t.Fatalf("SessionPath = %q, want %q", gotOpts.SessionPath, sessionPath)
+	}
+}
+
+func TestRunWatchReconnectMaxWait(t *testing.T) {
+	sentinel := errors.New("stubbed watch")
+	var gotOpts telegram.WatchOptions
+	orig := watchFlow
+	watchFlow = func(ctx context.Context, opts telegram.WatchOptions, st *store.Store, hooks telegram.WatchHooks) error {
+		gotOpts = opts
+		return sentinel
+	}
+	t.Cleanup(func() { watchFlow = orig })
+
+	dir := t.TempDir()
+	r := &runtime{ctx: context.Background(), stdout: io.Discard, stderr: io.Discard, dbPath: filepath.Join(dir, "telemcp.db")}
+	run := func(args ...string) error {
+		gotOpts = telegram.WatchOptions{}
+		return r.runWatch(args)
+	}
+
+	// The default caps the wait where the daemon stops dialing a dead network.
+	if err := run(); !errors.Is(err, sentinel) {
+		t.Fatalf("runWatch err = %v, want sentinel", err)
+	}
+	if gotOpts.ReconnectMaxWait != telegram.DefaultReconnectMaxWait {
+		t.Fatalf("ReconnectMaxWait = %s, want the default %s", gotOpts.ReconnectMaxWait, telegram.DefaultReconnectMaxWait)
+	}
+	if err := run("--reconnect-max-wait", "2m"); !errors.Is(err, sentinel) {
+		t.Fatalf("runWatch err = %v, want sentinel", err)
+	}
+	if gotOpts.ReconnectMaxWait != 2*time.Minute {
+		t.Fatalf("ReconnectMaxWait = %s, want 2m", gotOpts.ReconnectMaxWait)
+	}
+	// A wait under a second is a reconnect storm.
+	if err := run("--reconnect-max-wait", "500ms"); ExitCode(err) != 2 {
+		t.Fatalf("err = %v (exit status %d) for 500ms, want a usage error", err, ExitCode(err))
 	}
 }
