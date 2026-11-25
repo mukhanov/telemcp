@@ -370,7 +370,14 @@ func TestReconnectSchedulerRunsPeriodically(t *testing.T) {
 	s := newTestScheduler(t, 20*time.Millisecond, rec)
 	s.attach(&watchHandler{}, context.Background())
 	rec.ran(t) // startup
-	rec.ran(t) // periodic
+	// Every periodic tick is followed by another: rearming must not stall.
+	rec.ran(t)
+	rec.ran(t)
+	rec.ran(t)
+	// A requested pass still runs after the periodic ones.
+	s.ageLastDone(31 * time.Minute)
+	s.requestPass()
+	rec.ran(t)
 }
 
 func TestReconnectSchedulerPassEndsWithConnection(t *testing.T) {

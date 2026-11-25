@@ -198,7 +198,6 @@ type reconcileScheduler struct {
 	handler  *watchHandler
 	connCtx  context.Context
 	lastDone time.Time // end of the last completed pass
-	timer    *time.Timer
 }
 
 func newReconcileScheduler(opts WatchOptions, dbPath string) reconcileScheduler {
@@ -246,42 +245,35 @@ func (s *reconcileScheduler) detach() {
 // loop runs one pass at a time: one when a connection is first attached,
 // then every ReconcileEvery, plus the requested ones.
 func (s *reconcileScheduler) loop(ctx context.Context) {
-	defer func() {
-		if s.timer != nil {
-			s.timer.Stop()
-		}
-	}()
-	for {
-		tick := s.arm()
-		due := false
-		for !due {
-			select {
-			case <-ctx.Done():
-				return
-			case <-s.requests:
-				due = s.requestDue()
-			case <-tick:
-				due = true
-			}
-		}
+	for s.awaitPass(ctx) {
 		s.runPass(ctx)
 	}
 }
 
-// arm schedules the next periodic pass from now; nil when disabled.
-func (s *reconcileScheduler) arm() <-chan time.Time {
-	if s.opts.ReconcileEvery <= 0 {
-		return nil
+// awaitPass waits for the next pass to be due — the periodic one, or a
+// requested one that respects the spacing — and reports false once ctx
+// ends.
+func (s *reconcileScheduler) awaitPass(ctx context.Context) bool {
+	var tick <-chan time.Time
+	if s.opts.ReconcileEvery > 0 {
+		// A fresh timer per pass: draining a reused one after its tick was
+		// consumed blocks forever.
+		timer := time.NewTimer(s.opts.ReconcileEvery)
+		defer timer.Stop()
+		tick = timer.C
 	}
-	if s.timer == nil {
-		s.timer = time.NewTimer(s.opts.ReconcileEvery)
-	} else {
-		if !s.timer.Stop() {
-			<-s.timer.C
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.requests:
+			if s.requestDue() {
+				return true
+			}
+		case <-tick:
+			return true
 		}
-		s.timer.Reset(s.opts.ReconcileEvery)
 	}
-	return s.timer.C
 }
 
 // requestDue reports whether a requested pass may run now: not within
