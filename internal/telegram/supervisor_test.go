@@ -504,3 +504,16 @@ func TestNetworkFingerprintIsStable(t *testing.T) {
 		t.Fatalf("two readings of an unchanged network differ or are empty:\n%q\n%q", a, b)
 	}
 }
+
+func TestWaitForEndsOnTimerAndShutdown(t *testing.T) {
+	var logs strings.Builder
+	s := &watchSupervisor{log: watchStateLog{w: &logs}}
+	if err := s.waitFor(context.Background(), 10*time.Millisecond); err != nil {
+		t.Fatalf("waitFor = %v once the wait elapsed, want nil", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.waitFor(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitFor = %v after a shutdown, want context.Canceled", err)
+	}
+}

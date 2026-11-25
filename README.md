@@ -115,7 +115,8 @@ gentlest option for the account.
   not notice — is replaced; the daemon then waits between attempts with a
   growing, jittered pause (15 s doubling up to `--reconnect-max-wait`, 60 s
   by default), retries at once when the network changes, and skips the dial
-  while the routing table has no path to Telegram. A reconnect repeats
+  (up to three times in a row) while the routing table has no path to
+  Telegram. A reconnect repeats
   neither the channel bootstrap nor a full reconcile pass: `getDifference`
   from the stored pts covers the gap. A session Telegram rejected (401) is
   retried every 30 minutes and needs `telemcp login`.
