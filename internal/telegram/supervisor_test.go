@@ -313,6 +313,50 @@ func TestConnHealthProbesQuietConnection(t *testing.T) {
 	}
 }
 
+// silentProbe is a probe that never gets an answer.
+func silentProbe(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestConnHealthResetsWhenReadyConnectionStopsAnswering(t *testing.T) {
+	h, ctx := newConnHealth(context.Background(), fastConnHealth(), watchStateLog{}, nil)
+	defer h.stop()
+	h.setProbe(silentProbe)
+	h.connectionState(telegram.ConnectionStateReady)
+	h.answered()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("gotd still calls the connection ready and a request went unanswered: not reset")
+	}
+	if err := h.stalled(); !errors.Is(err, errConnectionStalled) {
+		t.Fatalf("stalled() = %v, want errConnectionStalled", err)
+	}
+}
+
+func TestConnHealthLeavesReconnectingToGotd(t *testing.T) {
+	cfg := fastConnHealth()
+	h, ctx := newConnHealth(context.Background(), cfg, watchStateLog{}, nil)
+	defer h.stop()
+	h.setProbe(silentProbe)
+	h.connectionState(telegram.ConnectionStateReady)
+	h.answered()
+	h.connectionState(telegram.ConnectionStateDisconnected) // gotd noticed the loss itself
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("reset while gotd was still reconnecting")
+	case <-time.After(cfg.stalledAfter / 2):
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("never reset once the stall deadline passed")
+	}
+}
+
 type invokerFunc func(context.Context, bin.Encoder, bin.Decoder) error
 
 func (f invokerFunc) Invoke(ctx context.Context, in bin.Encoder, out bin.Decoder) error {

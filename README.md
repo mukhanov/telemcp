@@ -111,12 +111,12 @@ gentlest option for the account.
   A lost connection is rebuilt in place: the daemon exits only when it is
   stopped. gotd's own reconnection loop covers short drops and keeps the
   updates manager and its state. A connection that goes two minutes without
-  an answer from Telegram — a dead tunnel, or a half-open socket gotd does
-  not notice — is replaced; the daemon then waits between attempts with a
-  growing, jittered pause (15 s doubling up to `--reconnect-max-wait`, 60 s
-  by default), retries at once when the network changes, and skips the dial
-  (up to three times in a row) while the routing table has no path to
-  Telegram. A reconnect repeats
+  an answer from Telegram — a dead tunnel — is replaced, and so is one that
+  gotd still calls ready although a request went unanswered. The daemon
+  then waits between attempts with a growing, jittered pause (15 s doubling
+  up to `--reconnect-max-wait`, 60 s by default), retries at once when the
+  network changes, and skips the dial (up to three times in a row) while
+  the routing table has no path to Telegram. A reconnect repeats
   neither the channel bootstrap nor a full reconcile pass: `getDifference`
   from the stored pts covers the gap. A session Telegram rejected (401) is
   retried every 30 minutes and needs `telemcp login`.

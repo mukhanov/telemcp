@@ -552,7 +552,9 @@ func (h *connHealth) loop(ctx context.Context) {
 			}
 			if ready && idle >= h.cfg.probeEvery && now.Sub(lastProbe) >= h.cfg.probeEvery {
 				lastProbe = now
-				h.probeConnection(ctx)
+				if h.probeConnection(ctx) {
+					return
+				}
 			}
 			timer.Reset(h.nextWake(ready, lastProbe))
 		}
@@ -604,18 +606,42 @@ func (h *connHealth) stall(idle time.Duration) {
 	h.cancel()
 }
 
-func (h *connHealth) probeConnection(ctx context.Context) {
+// probeConnection asks a quiet connection one cheap request. It reports that
+// the connection is dead in a way gotd does not notice: gotd still calls it
+// ready, yet the request got no answer. Once gotd has reported a loss, the
+// supervisor leaves the reconnection to it until the stall deadline.
+func (h *connHealth) probeConnection(ctx context.Context) (dead bool) {
 	h.mu.Lock()
 	probe := h.probe
 	h.mu.Unlock()
 	if probe == nil {
-		return
+		return false
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, h.cfg.probeTimeout)
 	defer cancel()
-	if err := probe(probeCtx); err != nil && ctx.Err() == nil {
-		h.log.printf("no answer to the liveness probe: %v", err)
+	err := probe(probeCtx)
+	if err == nil || ctx.Err() != nil {
+		return false
 	}
+	if !serverAnswered(err) && h.isReady() {
+		h.stall(h.idle(time.Now()))
+		return true
+	}
+	h.log.printf("no answer to the liveness probe: %v", err)
+	return false
+}
+
+func (h *connHealth) isReady() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ready
+}
+
+// idle is how long the connection went without an answer, at now.
+func (h *connHealth) idle(now time.Time) time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return now.Sub(h.lastAlive)
 }
 
 // liveFor is how long the connection answered, up to now.
