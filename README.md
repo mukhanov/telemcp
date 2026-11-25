@@ -97,15 +97,26 @@ gentlest option for the account.
       -e "s|com\.example\.telemcp-watch|com.$USER.telemcp-watch|" \
       contrib/com.example.telemcp-watch.plist > ~/Library/LaunchAgents/com.$USER.telemcp-watch.plist
   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.telemcp-watch.plist
+  launchctl kickstart gui/$(id -u)/com.$USER.telemcp-watch
   ```
+
+  `bootstrap` loads the job and `kickstart` starts it: launchd treats
+  `RunAtLoad` as a hint and may park that first start the same way it parks a
+  restart (see `telemcp status` below).
 
   Only one daemon may hold the archive's `watch.lock` at a time — stop any
   other watcher for the same database first. A manual `telemcp import`
   refuses to run while the daemon holds the lock.
 
   The daemon checks the Telegram connection every minute. A failed or stalled
-  check terminates the process so launchd's `KeepAlive` starts a clean
-  connection instead of leaving the archive silently stale.
+  check terminates the process so the supervisor starts a clean connection
+  instead of leaving the archive silently stale. launchd does not always
+  honor that restart: it can park the `KeepAlive` spawn after an exit and
+  leave the daemon off until something starts it by hand. `telemcp status`
+  shows the daemon, the launchd job and the archive in one report, exits 1
+  while the daemon is down, and prints the `launchctl kickstart` that brings
+  it back (`--json` for the same report as one object, `--label` for a job
+  named other than `com.<user>.telemcp-watch`).
 - **`telemcp import`** on a schedule (cron/launchd): repeated imports merge
   idempotently (no duplicates); `--messages-limit 100` keeps periodic syncs
   fast.
@@ -211,14 +222,14 @@ the exclusion and the chat's history reappears after the next sync.
 ## Project layout
 
 ```
-cmd/telemcp/          entry point: MCP server (default) + watch/import/prune
+cmd/telemcp/          entry point: MCP server (default) + watch/import/prune/status
 internal/archive/     read-only archive access for MCP: queries, FTS search, prune
 internal/config/      exclusion config (managed via MCP tools)
 internal/server/      MCP tool wiring
 internal/store/       archive writer: schema, idempotent merges, tombstones
 internal/telegram/    sessions (tdata + dedicated login), live updates,
                       media downloads, import (telecrawl watch port)
-internal/cli/         watch/import subcommands, media staging
+internal/cli/         watch/import/status subcommands, media staging
 internal/localfile/   path-containment guards for archived media
 contrib/              launchd templates (watch, prune)
 ```

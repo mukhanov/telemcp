@@ -14,6 +14,7 @@ func TestDetectSubcommand(t *testing.T) {
 		{name: "import", args: []string{"import"}, want: "import"},
 		{name: "sync", args: []string{"sync"}, want: "sync"},
 		{name: "prune", args: []string{"prune"}, want: "prune"},
+		{name: "status", args: []string{"status"}, want: "status"},
 		{name: "mcp mode", args: nil, want: ""},
 		{name: "mcp mode with dbpath", args: []string{"archive.db"}, want: ""},
 	}

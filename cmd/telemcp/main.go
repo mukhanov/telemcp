@@ -57,7 +57,7 @@ func main() {
 				os.Exit(cli.ExitCode(err))
 			}
 			return
-		case "watch", "import", "sync":
+		case "watch", "import", "sync", "status":
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			err := cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr)
@@ -106,6 +106,7 @@ Usage:
   telemcp import            one-shot tdata import
   telemcp login             authorize a dedicated session (~/.telemcp/session.json)
   telemcp prune             delete chats excluded via MCP
+  telemcp status            daemon state, launchd job and archive freshness; exit 1 when down
   telemcp --version         print version
   telemcp --help            this help
 
@@ -119,7 +120,7 @@ The MCP server resolves the database from DBPATH, $TELEMCP_DB, or
 func detectSubcommand(args []string) string {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "prune", "watch", "import", "sync", "login":
+		case "prune", "watch", "import", "sync", "login", "status":
 			return args[i]
 		case "--db", "--source": // value-carrying globals: skip their values
 			i++

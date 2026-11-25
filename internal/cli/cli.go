@@ -54,7 +54,7 @@ type runtime struct {
 	source string
 }
 
-// Run executes the subcommands (import, watch, login). args includes the
+// Run executes the subcommands (import, watch, status, login). args includes the
 // subcommand name, e.g. []string{"watch", "--reconcile-every", "30m"}.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -78,6 +78,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return r.runImport(rest[1:])
 	case "watch":
 		return r.runWatch(rest[1:])
+	case "status":
+		return r.runStatus(rest[1:])
 	case "login":
 		return r.runLogin(rest[1:])
 	default:
