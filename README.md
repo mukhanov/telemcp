@@ -116,10 +116,12 @@ gentlest option for the account.
   then waits between attempts with a growing, jittered pause (15 s doubling
   up to `--reconnect-max-wait`, 60 s by default), retries at once when the
   network changes, and skips the dial (up to three times in a row) while
-  the routing table has no path to Telegram. A reconnect repeats
-  neither the channel bootstrap nor a full reconcile pass: `getDifference`
-  from the stored pts covers the gap. A session Telegram rejected (401) is
-  retried every 30 minutes and needs `telemcp login`.
+  the routing table has no path to Telegram. A reconnect repeats the
+  channel bootstrap only for channels not checked for a day, and schedules
+  no full reconcile pass of its own: `getDifference` from the stored pts
+  covers the gap, and the manager's gap callbacks still ask for a pass when
+  they need one. A session Telegram rejected (401) is retried every 30
+  minutes and needs `telemcp login`.
 
   API requests start at most ten a second. Telegram answers a burst with
   `FLOOD_WAIT` and stops answering a connection that keeps tripping it,
