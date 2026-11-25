@@ -239,6 +239,20 @@ func TestRunStatus(t *testing.T) {
 		t.Fatalf("running daemon: daemon = %+v, want running", rep.Daemon)
 	}
 
+	// launchd names the pid of the daemon it runs.
+	stubSupervisor(t, &supervisorState{Kind: "launchd", Target: target, Loaded: true, State: "running", PID: 4242})
+	out.Reset()
+	if err := Run(ctx, []string{"--db", stopped, "--json", "status"}, &out, &strings.Builder{}); err != nil {
+		t.Fatalf("running daemon under launchd: err = %v, want nil", err)
+	}
+	rep = statusReport{}
+	if err := json.Unmarshal([]byte(out.String()), &rep); err != nil {
+		t.Fatalf("decode report %s: %v", out.String(), err)
+	}
+	if rep.Daemon.State != daemonRunning || rep.Daemon.PID != 4242 {
+		t.Fatalf("running daemon under launchd: daemon = %+v, want running with the launchd pid", rep.Daemon)
+	}
+
 	// launchd runs a process that does not answer yet: the daemon is starting.
 	stubSupervisor(t, &supervisorState{Kind: "launchd", Target: target, Loaded: true, State: "running", PID: 4242})
 	starting := openArchive(t)

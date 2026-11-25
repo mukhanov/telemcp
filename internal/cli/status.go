@@ -136,9 +136,12 @@ func collectStatus(ctx context.Context, dbPath, label string) *statusReport {
 	rep := &statusReport{Daemon: probeDaemon(dbPath), Log: logStatus{Path: watchLogPath(dbPath)}}
 	if s := supervisorProbe(label); s != nil {
 		rep.Supervisor = s
-		// The supervisor runs a process that does not answer yet: it is starting.
-		if rep.Daemon.State != daemonRunning && s.PID != 0 {
-			rep.Daemon.State, rep.Daemon.PID = daemonStarting, s.PID
+		if s.PID != 0 {
+			rep.Daemon.PID = s.PID
+			// A supervisor process that does not answer yet is starting.
+			if rep.Daemon.State != daemonRunning {
+				rep.Daemon.State = daemonStarting
+			}
 		}
 	}
 	db, err := archive.Open(dbPath)
